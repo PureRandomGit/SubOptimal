@@ -1,14 +1,16 @@
 #pragma once
 
+#include <WiFi.h>
+#include <WiFiUdp.h>
+
+#include "core/Types.h"
 #include "subsystems/DriveSubsystem.h"
 #include "subsystems/IMUSubsystem.h"
 #include "subsystems/TelemetrySubsystem.h"
 #include "control/ManualControl.h"
 #include "control/AutonomousControl.h"
 
-enum class RobotMode { MANUAL, AUTO };
-
-class Robot {
+class Sub {
 public:
     void init();
     void update();
@@ -21,4 +23,9 @@ public:
 
     ManualController manualCtrl;
     AutonomousController autoCtrl;
+
+private:
+    void initWiFi();
+
+    WiFiUDP telemetryUdp;
 };

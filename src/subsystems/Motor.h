@@ -6,19 +6,19 @@
 
 class Motor {
 private:
-    int pin;
-    int channel;
-    int frequency;
-    int resolutionBits;
+    uint8_t pin;
+    uint8_t channel;
+    uint16_t frequency;
+    uint8_t resolutionBits;
     float currentSpeed;
-    int maxDuty;
+    uint32_t maxDuty;
 public:
-    Motor(int pin, int channel, int frequency = 50, int resolutionBits = 10);
+    Motor(uint8_t pin, uint8_t channel, uint16_t frequency = 50, uint8_t resolutionBits = 12);
 
     void begin();
     void setSpeed(float speed);
     void stop();
-    float getSpeed();
+    float getSpeed() const;
 };
 
 #endif

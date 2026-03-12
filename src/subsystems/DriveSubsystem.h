@@ -1,22 +1,26 @@
 #pragma once
-#include "Motor.h"
 
-struct MotorSpeeds {
-    float bl = 0, br = 0, tl = 0, tr = 0;
-};
+#include <Arduino.h>
+
+#include "core/Config.h"
+#include "core/Types.h"
+#include "subsystems/Motor.h"
 
 class DriveSubsystem {
 public:
-    void init();
+    void begin();
     void update();
     void setSpeeds(const MotorSpeeds& speeds);
     void stop();
+    const MotorSpeeds& getSpeeds() const;
 
 private:
-    Motor _bl{9, 0}, _br{10, 1}, _tl{11, 2}, _tr{12, 3};
+    Motor _bl{Config::MOTOR_BL_PIN, Config::MOTOR_BL_CHANNEL};
+    Motor _br{Config::MOTOR_BR_PIN, Config::MOTOR_BR_CHANNEL};
+    Motor _tl{Config::MOTOR_TL_PIN, Config::MOTOR_TL_CHANNEL};
+    Motor _tr{Config::MOTOR_TR_PIN, Config::MOTOR_TR_CHANNEL};
     MotorSpeeds _currentSpeeds;
 
-    // Watchdog
-    unsigned long _lastCommandTime = 0;
-    static constexpr unsigned long TIMEOUT_MS = 500;
+    unsigned long _lastCommandTimeMs = 0;
+    static constexpr unsigned long COMMAND_TIMEOUT_MS = 500;
 };
