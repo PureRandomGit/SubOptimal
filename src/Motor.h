@@ -18,6 +18,7 @@ public:
     void begin();
     void setSpeed(float speed);
     void stop();
+    void hardStopSignal();
     float getSpeed();
 };
 

@@ -49,6 +49,14 @@ void Motor::stop() {
     setSpeed(0.0);
 }
 
+void Motor::hardStopSignal() {
+    // Force channel idle low. Many ESCs interpret loss of valid signal as stop/failsafe.
+    ledc_stop(LEDC_LOW_SPEED_MODE, (ledc_channel_t)channel, 0);
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+    currentSpeed = 0.0;
+}
+
 float Motor::getSpeed() {
     return currentSpeed;
 }
