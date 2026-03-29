@@ -223,7 +223,7 @@ void loop() {
 
     reedSwitch.update();
 
-      ArduinoOTA.handle();  // Handles OTA
+    ArduinoOTA.handle();  // Handles OTA
 
     switch (runState) {
 
@@ -234,6 +234,7 @@ void loop() {
 
         case RunState::Armed:
             WiFi.disconnect();
+            wifiConnected = false;
             headingBeep();
             if (reedSwitch.released()) {
                 timer = millis() + pathTime;
