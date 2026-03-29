@@ -4,8 +4,8 @@
 static const int MIN_PULSE_US = 1000;
 static const int MAX_PULSE_US = 2000;
 
-Motor::Motor(int motorPin, int ch, int pwmFreq, int pwmResBits)
-    : pin(motorPin), channel(ch), frequency(pwmFreq), resolutionBits(pwmResBits), currentSpeed(0.0) {
+Motor::Motor(int motorPin, int ch, int pwmFreq, int pwmResBits, float correctionFactor)
+    : pin(motorPin), channel(ch), frequency(pwmFreq), resolutionBits(pwmResBits), currentSpeed(0.0), correction(correctionFactor) {
     maxDuty = (1 << resolutionBits) - 1;
 }
 
@@ -37,6 +37,8 @@ void Motor::setSpeed(float speed) {
 
     // Convert speed (0.0-1.0) to pulse width (1000us-2000us)
     int pulseUs = MIN_PULSE_US + (int)(speed * (MAX_PULSE_US - MIN_PULSE_US));
+    // Apply correction factor
+    pulseUs = (int)(pulseUs * correction);
     // Convert pulse width to duty cycle value
     int periodUs = 1000000 / frequency;  // 20000us at 50Hz
     uint32_t duty = (uint32_t)((long)pulseUs * maxDuty / periodUs);
@@ -47,14 +49,6 @@ void Motor::setSpeed(float speed) {
 
 void Motor::stop() {
     setSpeed(0.0);
-}
-
-void Motor::hardStopSignal() {
-    // Force channel idle low. Many ESCs interpret loss of valid signal as stop/failsafe.
-    ledc_stop(LEDC_LOW_SPEED_MODE, (ledc_channel_t)channel, 0);
-    pinMode(pin, OUTPUT);
-    digitalWrite(pin, LOW);
-    currentSpeed = 0.0;
 }
 
 float Motor::getSpeed() {

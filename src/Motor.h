@@ -12,13 +12,13 @@ private:
     int resolutionBits;
     float currentSpeed;
     int maxDuty;
+    float correction;
 public:
-    Motor(int pin, int channel, int frequency = 50, int resolutionBits = 10);
+    Motor(int pin, int channel, int frequency = 50, int resolutionBits = 10, float correctionFactor = 1.0f);
 
     void begin();
     void setSpeed(float speed);
     void stop();
-    void hardStopSignal();
     float getSpeed();
 };
 
