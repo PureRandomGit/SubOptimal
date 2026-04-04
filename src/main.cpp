@@ -14,11 +14,11 @@ static const char* WIFI_PASS = "Suboptimal123";
 bool wifiConnected = false;
 
 // Reed switch: magnet held = closed/LOW, release = start mission
-static const uint8_t REED_SWITCH_PIN = 4;
+static const uint8_t REED_SWITCH_PIN = 17;
 Bounce2::Button reedSwitch = Bounce2::Button();
 
 // Buzzer Pin
-static const uint8_t BUZZER_PIN = 5;
+static const uint8_t BUZZER_PIN = 18;
 static const double heading = 30.0; // Desired heading in degrees
 
 // ESC timing
@@ -26,20 +26,20 @@ static const int PWM_FREQ = 50;
 static const int PWM_RES_BITS = 10;
 
 // Motors
-Motor bottomLeftMotor(9, 0, PWM_FREQ, PWM_RES_BITS, 1.0f);
-Motor bottomRightMotor(10, 1, PWM_FREQ, PWM_RES_BITS, 1.0f);
-Motor topLeftMotor(11, 2, PWM_FREQ, PWM_RES_BITS, 1.0f);
-Motor topRightMotor(12, 3, PWM_FREQ, PWM_RES_BITS, 1.0f);
+Motor bottomLeftMotor(10, 0, PWM_FREQ, PWM_RES_BITS, 1.0f);
+Motor bottomRightMotor(12, 1, PWM_FREQ, PWM_RES_BITS, 1.0f);
+Motor topLeftMotor(9, 2, PWM_FREQ, PWM_RES_BITS, 1.0f);
+Motor topRightMotor(11, 3, PWM_FREQ, PWM_RES_BITS, 1.0f);
 
 // IMU
-Adafruit_BNO08x bno085(BNO08X_RST);
+static const uint8_t BNO08X_SCK = 7;
+static const uint8_t BNO08X_MISO = 15;
+static const uint8_t BNO08X_MOSI = 5;
+static const uint8_t BNO08X_CS = 4;
+static const uint8_t BNO08X_INT = 16;
+static const int8_t BNO08X_RST = 6;
 
-static const uint8_t BNO08X_SCK = 18;
-static const uint8_t BNO08X_MISO = 17;
-static const uint8_t BNO08X_MOSI = 16;
-static const uint8_t BNO08X_CS = 15;
-static const uint8_t BNO08X_INT = 14;
-static const int8_t BNO08X_RST = 13;
+Adafruit_BNO08x bno085(BNO08X_RST);
 
 double yaw, pitch, roll;
 sh2_SensorValue_t sensorValue;
@@ -113,6 +113,26 @@ void stopMotors() {
     topRightMotor.stop();
 }
 
+
+void updateIMU() {
+    if (bno085.getSensorEvent(&sensorValue)) {
+        float qw = sensorValue.un.rotationVector.real;
+        float qx = sensorValue.un.rotationVector.i;
+        float qy = sensorValue.un.rotationVector.j;
+        float qz = sensorValue.un.rotationVector.k;
+
+        yaw   = toDegrees(atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)));
+        pitch = toDegrees(asin(2.0 * (qw * qy - qz * qx)));
+        roll  = toDegrees(atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy)));
+    }
+}
+
+void updatePID() {
+    yawPID.Compute();
+    pitchPID.Compute();
+    rollPID.Compute();
+}
+
 void headingBeep() {
     updateIMU();
 
@@ -129,14 +149,6 @@ void headingBeep() {
         tone(BUZZER_PIN, 1000, 50);
         lastBeep = now;
     }
-}
-
-
-
-void updatePID() {
-    yawPID.Compute();
-    pitchPID.Compute();
-    rollPID.Compute();
 }
 
 double calculateError(double current, double target) {
@@ -169,19 +181,6 @@ void path() {
     topLeftMotor.setSpeed(tl);
 
     topRightMotor.setSpeed(tr);
-}
-
-void updateIMU() {
-    if (bno085.getSensorEvent(&sensorValue)) {
-        float qw = sensorValue.un.rotationVector.real;
-        float qx = sensorValue.un.rotationVector.i;
-        float qy = sensorValue.un.rotationVector.j;
-        float qz = sensorValue.un.rotationVector.k;
-
-        yaw   = toDegrees(atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)));
-        pitch = toDegrees(asin(2.0 * (qw * qy - qz * qx)));
-        roll  = toDegrees(atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy)));
-    }
 }
 
 void setup() {
