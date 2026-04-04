@@ -19,7 +19,7 @@ Bounce2::Button reedSwitch = Bounce2::Button();
 
 // Buzzer Pin
 static const uint8_t BUZZER_PIN = 8;
-static const double heading = 30.0; // Desired heading in degrees
+double heading = 30.0;
 
 // ESC timing
 static const int PWM_FREQ = 50;
@@ -55,7 +55,7 @@ static double baseSpeed = 0.05;
 // Yaw PID
 double yawInput, yawOutput, yawSetpoint;
 
-double yawkp = 0.0;
+double yawkp = 0.1;
 double yawki = 0.0;
 double yawkd = 0.0;
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, yawkp, yawki, yawkd, DIRECT);
@@ -133,29 +133,14 @@ void updatePID() {
     rollPID.Compute();
 }
 
-void headingBeep() {
-    updateIMU();
-
-    if (yaw < 0) yaw += 360.0;
-
-    double diff = abs(yaw - heading);
-    if (diff > 180.0) diff = 360.0 - diff;  // shortest angular distance
-
-    // Faster beeps = closer to target heading
-    unsigned long interval = (unsigned long)map((long)diff, 0, 180, 100, 1500);
-
+void armedBeep() {
     static unsigned long lastToggle = 0;
     static bool buzzerOn = false;
     unsigned long now = millis();
-
-    if (now - lastToggle >= (buzzerOn ? 50UL : interval)) {
+    if (now - lastToggle >= (buzzerOn ? 50UL : 800UL)) {
         buzzerOn = !buzzerOn;
         digitalWrite(BUZZER_PIN, buzzerOn ? HIGH : LOW);
         lastToggle = now;
-    }
-    if (diff < 2.0) {
-        // Solid tone when within 5 degrees
-        digitalWrite(BUZZER_PIN, HIGH);
     }
 }
 
@@ -278,9 +263,12 @@ void loop() {
         case RunState::Armed:
             WiFi.disconnect();
             wifiConnected = false;
-            headingBeep();
+            updateIMU();  // keep yaw fresh
+            armedBeep();
             if (reedReleased) {
-                Serial.println(">>> Transitioning Armed -> Running");
+                if (yaw < 0) yaw += 360.0;
+                heading = yaw;          // zero reference
+                Serial.printf(">>> Transitioning Armed -> Running | Captured heading: %.1f\n", heading);
                 digitalWrite(BUZZER_PIN, LOW);
                 timer = millis() + pathTime;
                 runState = RunState::Running;
