@@ -14,11 +14,11 @@ static const char* WIFI_PASS = "Suboptimal123";
 bool wifiConnected = false;
 
 // Reed switch: magnet held = closed/LOW, release = start mission
-static const uint8_t REED_SWITCH_PIN = 17;
+static const uint8_t REED_SWITCH_PIN = 18;
 Bounce2::Button reedSwitch = Bounce2::Button();
 
 // Buzzer Pin
-static const uint8_t BUZZER_PIN = 18;
+static const uint8_t BUZZER_PIN = 8;
 static const double heading = 30.0; // Desired heading in degrees
 
 // ESC timing
@@ -141,13 +141,21 @@ void headingBeep() {
     double diff = abs(yaw - heading);
     if (diff > 180.0) diff = 360.0 - diff;  // shortest angular distance
 
+    // Faster beeps = closer to target heading
     unsigned long interval = (unsigned long)map((long)diff, 0, 180, 100, 1500);
 
-    static unsigned long lastBeep = 0;
+    static unsigned long lastToggle = 0;
+    static bool buzzerOn = false;
     unsigned long now = millis();
-    if (now - lastBeep >= interval) {
-        tone(BUZZER_PIN, 1000, 50);
-        lastBeep = now;
+
+    if (now - lastToggle >= (buzzerOn ? 50UL : interval)) {
+        buzzerOn = !buzzerOn;
+        digitalWrite(BUZZER_PIN, buzzerOn ? HIGH : LOW);
+        lastToggle = now;
+    }
+    if (diff < 2.0) {
+        // Solid tone when within 5 degrees
+        digitalWrite(BUZZER_PIN, HIGH);
     }
 }
 
@@ -211,10 +219,15 @@ void setup() {
     topLeftMotor.begin();
     topRightMotor.begin();
 
-    //Pin configiurations
+    //Pin configurations
+    pinMode(BUZZER_PIN, OUTPUT);
+    digitalWrite(BUZZER_PIN, LOW);
+
     reedSwitch.attach(REED_SWITCH_PIN, INPUT_PULLUP);
-    reedSwitch.interval(5);
-    reedSwitch.setPressedState(HIGH); // TODO: Test if this is the correct state
+    reedSwitch.interval(100);
+    reedSwitch.setPressedState(false); // TODO: Test if this is the correct state
+
+    Serial.println("Setup complete, entering main loop.");
 
 }
 
@@ -224,18 +237,51 @@ void loop() {
 
     ArduinoOTA.handle();  // Handles OTA
 
+    unsigned long now = millis();
+
+    // Capture edge events once — Bounce2 consumes these on first call
+    bool reedPressed  = reedSwitch.pressed();
+    bool reedReleased = reedSwitch.released();
+
+    // Throttled reed switch diagnostics (every 500ms)
+    static unsigned long lastReedLog = 0;
+    static RunState lastLoggedState = RunState::Finished; // force first print
+    if (now - lastReedLog >= 500 || runState != lastLoggedState) {
+        lastReedLog = now;
+        lastLoggedState = runState;
+        int rawPin = digitalRead(REED_SWITCH_PIN);
+        Serial.printf("[%lu ms] State=%-8s | PIN18 raw=%d (LOW=closed) | isPressed=%d\n",
+            now,
+            runState == RunState::Idle     ? "Idle"    :
+            runState == RunState::Armed    ? "Armed"   :
+            runState == RunState::Running  ? "Running" : "Finished",
+            rawPin,
+            reedSwitch.isPressed()
+        );
+    }
+
+    // Log edge events immediately
+    if (reedPressed)  Serial.printf("[%lu ms] REED EVENT: pressed (magnet applied)\n", now);
+    if (reedReleased) Serial.printf("[%lu ms] REED EVENT: released (magnet removed)\n", now);
+
     switch (runState) {
 
         case RunState::Idle:
             if (!wifiConnected) connectToWiFi();
-            if (reedSwitch.pressed()) runState = RunState::Armed;
+            // Also allow transition if magnet is already present at boot (isPressed covers held state)
+            if (reedPressed || reedSwitch.isPressed()) {
+                Serial.println(">>> Transitioning Idle -> Armed");
+                runState = RunState::Armed;
+            }
             break;
 
         case RunState::Armed:
             WiFi.disconnect();
             wifiConnected = false;
             headingBeep();
-            if (reedSwitch.released()) {
+            if (reedReleased) {
+                Serial.println(">>> Transitioning Armed -> Running");
+                digitalWrite(BUZZER_PIN, LOW);
                 timer = millis() + pathTime;
                 runState = RunState::Running;
             }
@@ -245,12 +291,14 @@ void loop() {
             if (millis() <= timer) {
                 path();
             } else {
+                Serial.println(">>> Transitioning Running -> Finished");
                 runState = RunState::Finished;
             }
             break;
 
         case RunState::Finished:
             stopMotors();
+            Serial.println(">>> Transitioning Finished -> Idle");
             runState = RunState::Idle;
             break;
     }
