@@ -26,10 +26,10 @@ static const int PWM_FREQ = 50;
 static const int PWM_RES_BITS = 10;
 
 // Motors
-Motor bottomLeftMotor(10, 0, PWM_FREQ, PWM_RES_BITS, 1.0f);
-Motor bottomRightMotor(12, 1, PWM_FREQ, PWM_RES_BITS, 1.0f);
-Motor topLeftMotor(9, 2, PWM_FREQ, PWM_RES_BITS, 1.0f);
-Motor topRightMotor(11, 3, PWM_FREQ, PWM_RES_BITS, 1.0f);
+Motor bottomLeftMotor(11, 0, PWM_FREQ, PWM_RES_BITS, 1.0f);
+Motor bottomRightMotor(10, 1, PWM_FREQ, PWM_RES_BITS, 1.0f);
+Motor topLeftMotor(12, 2, PWM_FREQ, PWM_RES_BITS, 1.0f);
+Motor topRightMotor(9, 3, PWM_FREQ, PWM_RES_BITS, 1.0f);
 
 // IMU
 static const uint8_t BNO08X_SCK = 7;
@@ -50,7 +50,7 @@ unsigned long timer = 0;
 
 // PIDs
 
-static double baseSpeed = 0.5;
+static double baseSpeed = 0.05;
 
 // Yaw PID
 double yawInput, yawOutput, yawSetpoint;
@@ -173,7 +173,7 @@ void path() {
 
     double yawError = -calculateError(yaw, heading);
 
-    pitchInput = pitch;
+    pitchInput = -pitch;
     yawInput = yawError;
     rollInput = roll;
 
@@ -192,6 +192,12 @@ void path() {
 }
 
 void setup() {
+    // Motors first — pins must output min throttle (1000us) before ESCs finish booting
+    bottomLeftMotor.begin();
+    bottomRightMotor.begin();
+    topLeftMotor.begin();
+    topRightMotor.begin();
+
     delay(1000);
     Serial.begin(115200);
     connectToWiFi();
@@ -213,18 +219,12 @@ void setup() {
     pitchPID.SetOutputLimits(-0.1, 0.1);
     yawPID.SetOutputLimits(-0.1, 0.1);
 
-    // Motor Setup
-    bottomLeftMotor.begin();
-    bottomRightMotor.begin();
-    topLeftMotor.begin();
-    topRightMotor.begin();
-
     //Pin configurations
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
 
     reedSwitch.attach(REED_SWITCH_PIN, INPUT_PULLUP);
-    reedSwitch.interval(100);
+    reedSwitch.interval(500);
     reedSwitch.setPressedState(false); // TODO: Test if this is the correct state
 
     Serial.println("Setup complete, entering main loop.");
