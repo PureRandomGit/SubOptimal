@@ -13,13 +13,12 @@ static const char* WIFI_SSID = "Suboptimal";
 static const char* WIFI_PASS = "Suboptimal123";
 bool wifiConnected = false;
 
-// Reed switch: magnet held = closed/LOW, release = start mission
 static const uint8_t REED_SWITCH_PIN = 18;
 Bounce2::Button reedSwitch = Bounce2::Button();
 
 // Buzzer Pin
 static const uint8_t BUZZER_PIN = 8;
-double heading = 30.0;
+double heading = 0.0;
 
 // ESC timing
 static const int PWM_FREQ = 50;
@@ -45,24 +44,23 @@ double yaw, pitch, roll;
 sh2_SensorValue_t sensorValue;
 
 // Timing
-static const double pathTime = 5000; // 5 seconds
+static const double pathTime = 10000;
 unsigned long timer = 0;
 
 // PIDs
-
-static double baseSpeed = 0.05;
+static double baseSpeed = 0.8;
 
 // Yaw PID
 double yawInput, yawOutput, yawSetpoint;
 
-double yawkp = 0.1;
+double yawkp = 0.0;
 double yawki = 0.0;
 double yawkd = 0.0;
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, yawkp, yawki, yawkd, DIRECT);
 
 // Pitch PID
-double pitchInput, pitchOutput, pitchSetpoint;
-double pitchkp = 0.0;
+double pitchInput, pitchOutput, pitchSetpoint = -30;
+double pitchkp = 0.8;
 double pitchki = 0.0;
 double pitchkd = 0.0;
 PID pitchPID(&pitchInput, &pitchOutput, &pitchSetpoint, pitchkp, pitchki, pitchkd, DIRECT);
@@ -172,12 +170,10 @@ void path() {
     bottomLeftMotor.setSpeed(bl);
     bottomRightMotor.setSpeed(br);
     topLeftMotor.setSpeed(tl);
-
     topRightMotor.setSpeed(tr);
 }
 
 void setup() {
-    // Motors first — pins must output min throttle (1000us) before ESCs finish booting
     bottomLeftMotor.begin();
     bottomRightMotor.begin();
     topLeftMotor.begin();
@@ -200,9 +196,9 @@ void setup() {
     pitchPID.SetMode(AUTOMATIC);
     yawPID.SetMode(AUTOMATIC);
 
-    rollPID.SetOutputLimits(-0.1, 0.1);
-    pitchPID.SetOutputLimits(-0.1, 0.1);
-    yawPID.SetOutputLimits(-0.1, 0.1);
+    rollPID.SetOutputLimits(-0.2, 0.2);
+    pitchPID.SetOutputLimits(-0.2, 0.2);
+    yawPID.SetOutputLimits(-0.2, 0.2);
 
     //Pin configurations
     pinMode(BUZZER_PIN, OUTPUT);
@@ -210,51 +206,22 @@ void setup() {
 
     reedSwitch.attach(REED_SWITCH_PIN, INPUT_PULLUP);
     reedSwitch.interval(500);
-    reedSwitch.setPressedState(false); // TODO: Test if this is the correct state
+    reedSwitch.setPressedState(false);
 
-    Serial.println("Setup complete, entering main loop.");
-
+    Serial.println("Setup complete.");
 }
 
 void loop() {
 
     reedSwitch.update();
 
-    ArduinoOTA.handle();  // Handles OTA
-
-    unsigned long now = millis();
-
-    // Capture edge events once — Bounce2 consumes these on first call
-    bool reedPressed  = reedSwitch.pressed();
-    bool reedReleased = reedSwitch.released();
-
-    // Throttled reed switch diagnostics (every 500ms)
-    static unsigned long lastReedLog = 0;
-    static RunState lastLoggedState = RunState::Finished; // force first print
-    if (now - lastReedLog >= 500 || runState != lastLoggedState) {
-        lastReedLog = now;
-        lastLoggedState = runState;
-        int rawPin = digitalRead(REED_SWITCH_PIN);
-        Serial.printf("[%lu ms] State=%-8s | PIN18 raw=%d (LOW=closed) | isPressed=%d\n",
-            now,
-            runState == RunState::Idle     ? "Idle"    :
-            runState == RunState::Armed    ? "Armed"   :
-            runState == RunState::Running  ? "Running" : "Finished",
-            rawPin,
-            reedSwitch.isPressed()
-        );
-    }
-
-    // Log edge events immediately
-    if (reedPressed)  Serial.printf("[%lu ms] REED EVENT: pressed (magnet applied)\n", now);
-    if (reedReleased) Serial.printf("[%lu ms] REED EVENT: released (magnet removed)\n", now);
+    ArduinoOTA.handle();
 
     switch (runState) {
 
         case RunState::Idle:
             if (!wifiConnected) connectToWiFi();
-            // Also allow transition if magnet is already present at boot (isPressed covers held state)
-            if (reedPressed || reedSwitch.isPressed()) {
+            if (reedSwitch.isPressed()) {
                 Serial.println(">>> Transitioning Idle -> Armed");
                 runState = RunState::Armed;
             }
@@ -263,11 +230,11 @@ void loop() {
         case RunState::Armed:
             WiFi.disconnect();
             wifiConnected = false;
-            updateIMU();  // keep yaw fresh
+            updateIMU();
             armedBeep();
-            if (reedReleased) {
+            if (reedSwitch.released()) {
                 if (yaw < 0) yaw += 360.0;
-                heading = yaw;          // zero reference
+                heading = yaw;
                 Serial.printf(">>> Transitioning Armed -> Running | Captured heading: %.1f\n", heading);
                 digitalWrite(BUZZER_PIN, LOW);
                 timer = millis() + pathTime;
