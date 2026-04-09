@@ -66,19 +66,19 @@ static const double pathTime = 10000;
 unsigned long timer = 0;
 
 // PIDs
-static double baseSpeed = 0.8;
+static double baseSpeed = 0.5;
 
 // Yaw PID
 double yawInput, yawOutput, yawSetpoint;
 
-double yawkp = 0.1;
+double yawkp = 0.2;
 double yawki = 0.0;
 double yawkd = 0.0;
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, yawkp, yawki, yawkd, DIRECT);
 
 // Pitch PID
-double pitchInput, pitchOutput, pitchSetpoint = 0;
-double pitchkp = 0.1;
+double pitchInput, pitchOutput, pitchSetpoint = 30;
+double pitchkp = 0.5;
 double pitchki = 0.0;
 double pitchkd = 0.0;
 PID pitchPID(&pitchInput, &pitchOutput, &pitchSetpoint, pitchkp, pitchki, pitchkd, DIRECT);
@@ -228,10 +228,10 @@ void path() {
 
     updatePID();
 
-    float tl = baseSpeed + pitchOutput + yawOutput + rollOutput;
-    float tr = baseSpeed + pitchOutput - yawOutput - rollOutput;
-    float bl = baseSpeed - pitchOutput + yawOutput - rollOutput;
-    float br = baseSpeed - pitchOutput - yawOutput + rollOutput;
+    float tl = baseSpeed - pitchOutput + yawOutput + rollOutput;
+    float tr = baseSpeed - pitchOutput - yawOutput - rollOutput;
+    float bl = baseSpeed + pitchOutput + yawOutput - rollOutput;
+    float br = baseSpeed + pitchOutput - yawOutput + rollOutput;
 
     bottomLeftMotor.setSpeed(bl);
     bottomRightMotor.setSpeed(br);
@@ -272,8 +272,8 @@ void setup() {
     pitchPID.SetMode(AUTOMATIC);
     yawPID.SetMode(AUTOMATIC);
 
-    rollPID.SetOutputLimits(-0.5, 0.5);
-    pitchPID.SetOutputLimits(-0.5, 0.5);
+    rollPID.SetOutputLimits(-0.3, 0.3);
+    pitchPID.SetOutputLimits(-1, 1);
     yawPID.SetOutputLimits(-0.5, 0.5);
 
     //Pin configurations
