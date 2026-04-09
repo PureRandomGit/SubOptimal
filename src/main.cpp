@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
+#include <WebServer.h>
 #include <SPI.h>
 #include <PID_v1.h>
 #include <Adafruit_BNO08x.h>
@@ -30,6 +31,23 @@ Motor bottomRightMotor(10, 1, PWM_FREQ, PWM_RES_BITS, 1.0f);
 Motor topLeftMotor(12, 2, PWM_FREQ, PWM_RES_BITS, 1.0f);
 Motor topRightMotor(9, 3, PWM_FREQ, PWM_RES_BITS, 1.0f);
 
+// PID log buffer
+struct LogEntry {
+    uint32_t timestamp;
+    float yaw, pitch, roll;
+    float pitchIn, pitchOut, pitchSetpt;
+    float rollIn, rollOut, rollSetpt;
+    float yawIn, yawOut, yawSetpt;
+    float motorTL, motorTR, motorBL, motorBR;
+};
+
+static const int LOG_BUFFER_SIZE = 1000;
+LogEntry logBuffer[LOG_BUFFER_SIZE];
+int logCount = 0;
+
+WebServer webServer(80);
+bool webServerStarted = false;
+
 // IMU
 static const uint8_t BNO08X_SCK = 7;
 static const uint8_t BNO08X_MISO = 15;
@@ -53,14 +71,14 @@ static double baseSpeed = 0.8;
 // Yaw PID
 double yawInput, yawOutput, yawSetpoint;
 
-double yawkp = 0.0;
+double yawkp = 0.1;
 double yawki = 0.0;
 double yawkd = 0.0;
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, yawkp, yawki, yawkd, DIRECT);
 
 // Pitch PID
-double pitchInput, pitchOutput, pitchSetpoint = -30;
-double pitchkp = 0.8;
+double pitchInput, pitchOutput, pitchSetpoint = 0;
+double pitchkp = 0.1;
 double pitchki = 0.0;
 double pitchkd = 0.0;
 PID pitchPID(&pitchInput, &pitchOutput, &pitchSetpoint, pitchkp, pitchki, pitchkd, DIRECT);
@@ -81,6 +99,47 @@ enum class RunState {
 
 RunState runState = RunState::Idle;
 
+void chime(int count, int delayMs) {
+    for (int i = 0; i < count; i++) {
+        digitalWrite(BUZZER_PIN, HIGH);
+        delay(delayMs);
+        digitalWrite(BUZZER_PIN, LOW);
+        delay(delayMs);
+    }
+}
+
+void serveLogs() {
+    webServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    webServer.send(200, "text/csv", "");
+    webServer.sendContent(
+        "timestamp_ms,yaw,pitch,roll,"
+        "pitchIn,pitchOut,pitchSetpt,"
+        "rollIn,rollOut,rollSetpt,"
+        "yawIn,yawOut,yawSetpt,"
+        "motorTL,motorTR,motorBL,motorBR\n"
+    );
+    char line[256];
+    for (int i = 0; i < logCount; i++) {
+        const LogEntry& e = logBuffer[i];
+        snprintf(line, sizeof(line),
+            "%lu,%.3f,%.3f,%.3f,"
+            "%.4f,%.4f,%.4f,"
+            "%.4f,%.4f,%.4f,"
+            "%.4f,%.4f,%.4f,"
+            "%.4f,%.4f,%.4f,%.4f\n",
+            (unsigned long)e.timestamp,
+            e.yaw, e.pitch, e.roll,
+            e.pitchIn, e.pitchOut, e.pitchSetpt,
+            e.rollIn, e.rollOut, e.rollSetpt,
+            e.yawIn, e.yawOut, e.yawSetpt,
+            e.motorTL, e.motorTR, e.motorBL, e.motorBR);
+        webServer.sendContent(line);
+    }
+    webServer.sendContent("");
+    chime(3, 100);
+    Serial.printf("Served %d log entries\n", logCount);
+}
+
 // Connects To Wifi
 void connectToWiFi() {
     WiFi.mode(WIFI_STA);
@@ -97,6 +156,13 @@ void connectToWiFi() {
 
     ArduinoOTA.begin();
 
+    if (!webServerStarted) {
+        webServer.on("/logs", HTTP_GET, serveLogs);
+        webServerStarted = true;
+    }
+    webServer.begin();
+    Serial.printf("Log server up at http://%s/logs (%d entries)\n", WiFi.localIP().toString().c_str(), logCount);
+    chime(2, 200);
     wifiConnected = true;
 }
 
@@ -156,8 +222,8 @@ void path() {
 
     double yawError = -calculateError(yaw, heading);
 
-    pitchInput = -pitch;
-    yawInput = yawError;
+    pitchInput = pitch;
+    yawInput = -yawError;
     rollInput = roll;
 
     updatePID();
@@ -171,6 +237,16 @@ void path() {
     bottomRightMotor.setSpeed(br);
     topLeftMotor.setSpeed(tl);
     topRightMotor.setSpeed(tr);
+
+    if (logCount < LOG_BUFFER_SIZE) {
+        LogEntry& e = logBuffer[logCount++];
+        e.timestamp  = millis();
+        e.yaw        = (float)yaw;         e.pitch      = (float)pitch;       e.roll       = (float)roll;
+        e.pitchIn    = (float)pitchInput;  e.pitchOut   = (float)pitchOutput; e.pitchSetpt = (float)pitchSetpoint;
+        e.rollIn     = (float)rollInput;   e.rollOut    = (float)rollOutput;  e.rollSetpt  = (float)rollSetpoint;
+        e.yawIn      = (float)yawInput;    e.yawOut     = (float)yawOutput;   e.yawSetpt   = (float)yawSetpoint;
+        e.motorTL = tl; e.motorTR = tr; e.motorBL = bl; e.motorBR = br;
+    }
 }
 
 void setup() {
@@ -196,9 +272,9 @@ void setup() {
     pitchPID.SetMode(AUTOMATIC);
     yawPID.SetMode(AUTOMATIC);
 
-    rollPID.SetOutputLimits(-0.2, 0.2);
-    pitchPID.SetOutputLimits(-0.2, 0.2);
-    yawPID.SetOutputLimits(-0.2, 0.2);
+    rollPID.SetOutputLimits(-0.5, 0.5);
+    pitchPID.SetOutputLimits(-0.5, 0.5);
+    yawPID.SetOutputLimits(-0.5, 0.5);
 
     //Pin configurations
     pinMode(BUZZER_PIN, OUTPUT);
@@ -216,6 +292,7 @@ void loop() {
     reedSwitch.update();
 
     ArduinoOTA.handle();
+    if (wifiConnected) webServer.handleClient();
 
     switch (runState) {
 
@@ -235,6 +312,7 @@ void loop() {
             if (reedSwitch.released()) {
                 if (yaw < 0) yaw += 360.0;
                 heading = yaw;
+                logCount = 0;
                 Serial.printf(">>> Transitioning Armed -> Running | Captured heading: %.1f\n", heading);
                 digitalWrite(BUZZER_PIN, LOW);
                 timer = millis() + pathTime;
