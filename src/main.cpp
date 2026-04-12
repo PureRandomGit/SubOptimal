@@ -272,7 +272,7 @@ void setup() {
     pitchPID.SetMode(AUTOMATIC);
     yawPID.SetMode(AUTOMATIC);
 
-    rollPID.SetOutputLimits(-0.3, 0.3);
+    rollPID.SetOutputLimits(-0.5, 0.5);
     pitchPID.SetOutputLimits(-1, 1);
     yawPID.SetOutputLimits(-0.5, 0.5);
 
