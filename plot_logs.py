@@ -95,6 +95,15 @@ class App:
             self.status_var.set(f"Error: {exc}")
             messagebox.showerror("Error", str(exc))
 
+    @staticmethod
+    def _center_zero(ax, *series):
+        """Set y-limits so that 0 is exactly centred on the axis."""
+        vals = [v for s in series for v in s]
+        if not vals:
+            return
+        half = max(abs(min(vals)), abs(max(vals)))
+        ax.set_ylim(-(half or 1.0), (half or 1.0))
+
     def _plot(self, d: dict):
         t = [ms / 1000.0 for ms in d["timestamp_ms"]]
         self.fig.clear()
@@ -110,6 +119,8 @@ class App:
         ax1_r.tick_params(axis="y", labelcolor="orange")
         ax1.set_ylabel("Pitch (°)")
         ax1.set_title("Pitch")
+        self._center_zero(ax1,  d["pitch"], [d["pitchSetpt"][0]])
+        self._center_zero(ax1_r, d["pitchOut"])
         lines1 = ax1.get_lines() + ax1_r.get_lines()
         ax1.legend(lines1, [l.get_label() for l in lines1], loc="upper right", fontsize=8)
         ax1.grid(True, alpha=0.4)
@@ -125,6 +136,8 @@ class App:
         ax2_r.tick_params(axis="y", labelcolor="orange")
         ax2.set_ylabel("Roll (°)")
         ax2.set_title("Roll")
+        self._center_zero(ax2,  d["roll"], [d["rollSetpt"][0]])
+        self._center_zero(ax2_r, d["rollOut"])
         lines2 = ax2.get_lines() + ax2_r.get_lines()
         ax2.legend(lines2, [l.get_label() for l in lines2], loc="upper right", fontsize=8)
         ax2.grid(True, alpha=0.4)
@@ -140,6 +153,8 @@ class App:
         ax3_r.tick_params(axis="y", labelcolor="orange")
         ax3.set_ylabel("Yaw (°)")
         ax3.set_title("Yaw")
+        self._center_zero(ax3,  d["yawIn"], [d["yawSetpt"][0]])
+        self._center_zero(ax3_r, d["yawOut"])
         lines3 = ax3.get_lines() + ax3_r.get_lines()
         ax3.legend(lines3, [l.get_label() for l in lines3], loc="upper right", fontsize=8)
         ax3.grid(True, alpha=0.4)
@@ -150,6 +165,7 @@ class App:
         ax4.plot(t, d["velY"], label="velY", color="mediumpurple")
         ax4.plot(t, d["velZ"], label="velZ", color="coral")
         ax4.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+        self._center_zero(ax4, d["velX"], d["velY"], d["velZ"])
         ax4.set_ylabel("Velocity (m/s)")
         ax4.set_title("Velocity")
         ax4.set_xlabel("Time (s)")

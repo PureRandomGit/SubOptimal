@@ -76,13 +76,13 @@ static double stabilizeSpeed = 0.15;
 // Yaw PID
 double yawInput, yawOutput, yawSetpoint;
 
-double yawkp = 0.08;
+double yawkp = 0.05;
 double yawki = 0.0;
 double yawkd = 0.0;
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, yawkp, yawki, yawkd, DIRECT);
 
 // Pitch PD — P on angle error (targets level), D on gyro rate (fast response)
-double pitchOutput, pitchSetpoint = 0.0;
+double pitchOutput, pitchSetpoint = 2.0;
 double pitchkp = 0.03;
 double pitchkd = 0.001;
 
