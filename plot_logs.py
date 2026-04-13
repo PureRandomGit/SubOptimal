@@ -55,7 +55,7 @@ class App:
         ttk.Label(bar, textvariable=self.status_var, foreground="gray").pack(side=tk.LEFT, padx=10)
 
         # --- Plot area ---
-        self.fig = Figure(figsize=(13, 8), tight_layout=True)
+        self.fig = Figure(figsize=(13, 10), tight_layout=True)
         canvas = FigureCanvasTkAgg(self.fig, master=root)
         NavigationToolbar2Tk(canvas, root)
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
@@ -100,7 +100,7 @@ class App:
         self.fig.clear()
 
         # --- Pitch ---
-        ax1 = self.fig.add_subplot(3, 1, 1)
+        ax1 = self.fig.add_subplot(4, 1, 1)
         ax1.plot(t, d["pitch"], label="pitch (actual)", color="steelblue")
         ax1.axhline(d["pitchSetpt"][0], color="tomato", linestyle="--",
                     label=f"setpoint ({d['pitchSetpt'][0]:.1f}°)")
@@ -115,7 +115,7 @@ class App:
         ax1.grid(True, alpha=0.4)
 
         # --- Roll ---
-        ax2 = self.fig.add_subplot(3, 1, 2)
+        ax2 = self.fig.add_subplot(4, 1, 2)
         ax2.plot(t, d["roll"], label="roll (actual)", color="steelblue")
         ax2.axhline(d["rollSetpt"][0], color="tomato", linestyle="--",
                     label=f"setpoint ({d['rollSetpt'][0]:.1f}°)")
@@ -130,7 +130,7 @@ class App:
         ax2.grid(True, alpha=0.4)
 
         # --- Yaw ---
-        ax3 = self.fig.add_subplot(3, 1, 3)
+        ax3 = self.fig.add_subplot(4, 1, 3)
         ax3.plot(t, d["yawIn"], label="yaw error (actual)", color="steelblue")
         ax3.axhline(d["yawSetpt"][0], color="tomato", linestyle="--",
                     label=f"setpoint ({d['yawSetpt'][0]:.1f}°)")
@@ -140,10 +140,21 @@ class App:
         ax3_r.tick_params(axis="y", labelcolor="orange")
         ax3.set_ylabel("Yaw (°)")
         ax3.set_title("Yaw")
-        ax3.set_xlabel("Time (s)")
         lines3 = ax3.get_lines() + ax3_r.get_lines()
         ax3.legend(lines3, [l.get_label() for l in lines3], loc="upper right", fontsize=8)
         ax3.grid(True, alpha=0.4)
+
+        # --- Velocity ---
+        ax4 = self.fig.add_subplot(4, 1, 4)
+        ax4.plot(t, d["velX"], label="velX", color="mediumseagreen")
+        ax4.plot(t, d["velY"], label="velY", color="mediumpurple")
+        ax4.plot(t, d["velZ"], label="velZ", color="coral")
+        ax4.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+        ax4.set_ylabel("Velocity (m/s)")
+        ax4.set_title("Velocity")
+        ax4.set_xlabel("Time (s)")
+        ax4.legend(loc="upper right", fontsize=8)
+        ax4.grid(True, alpha=0.4)
 
         self.fig.tight_layout()
         self.canvas.draw()

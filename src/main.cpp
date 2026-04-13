@@ -26,10 +26,10 @@ static const int PWM_FREQ = 50;
 static const int PWM_RES_BITS = 10;
 
 // Motors
-Motor bottomLeftMotor(11, 0, PWM_FREQ, PWM_RES_BITS, 1.0f);
-Motor bottomRightMotor(10, 1, PWM_FREQ, PWM_RES_BITS, 1.0f);
-Motor topLeftMotor(12, 2, PWM_FREQ, PWM_RES_BITS, 1.0f);
-Motor topRightMotor(9, 3, PWM_FREQ, PWM_RES_BITS, 1.0f);
+Motor topLeftMotor(11, 0, PWM_FREQ, PWM_RES_BITS, 1.0f);
+Motor topRightMotor(10, 1, PWM_FREQ, PWM_RES_BITS, 1.0f);
+Motor bottomLeftMotor(12, 2, PWM_FREQ, PWM_RES_BITS, 1.0f);
+Motor bottomRightMotor(9, 3, PWM_FREQ, PWM_RES_BITS, 1.0f);
 
 // PID log buffer
 struct LogEntry {
@@ -39,6 +39,7 @@ struct LogEntry {
     float rollIn, rollOut, rollSetpt;
     float yawIn, yawOut, yawSetpt;
     float motorTL, motorTR, motorBL, motorBR;
+    float velX, velY, velZ;
 };
 
 static const int LOG_BUFFER_SIZE = 1000;
@@ -59,33 +60,35 @@ static const int8_t BNO08X_RST = 6;
 Adafruit_BNO08x bno085(BNO08X_RST);
 
 double yaw, pitch, roll;
+double gyroPitch = 0.0; // deg/s — pitch angular rate for depth control
+double velX = 0.0, velY = 0.0, velZ = 0.0;
+unsigned long lastAccelTime = 0;
 sh2_SensorValue_t sensorValue;
 
 // Timing
-static const double pathTime = 10000;
+static const double pathTime = 6000;
 unsigned long timer = 0;
 
 // PIDs
-static double baseSpeed = 0.5;
+static double baseSpeed = 0.7;
+static double stabilizeSpeed = 0.15;
 
 // Yaw PID
 double yawInput, yawOutput, yawSetpoint;
 
-double yawkp = 0.2;
+double yawkp = 0.08;
 double yawki = 0.0;
 double yawkd = 0.0;
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, yawkp, yawki, yawkd, DIRECT);
 
-// Pitch PID
-double pitchInput, pitchOutput, pitchSetpoint = 30;
-double pitchkp = 0.5;
-double pitchki = 0.0;
-double pitchkd = 0.0;
-PID pitchPID(&pitchInput, &pitchOutput, &pitchSetpoint, pitchkp, pitchki, pitchkd, DIRECT);
+// Pitch PD — P on angle error (targets level), D on gyro rate (fast response)
+double pitchOutput, pitchSetpoint = 0.0;
+double pitchkp = 0.03;
+double pitchkd = 0.001;
 
 // Roll PID
 double rollInput, rollOutput, rollSetpoint;
-double rollkp = 0.0;
+double rollkp = 0.01;
 double rollki = 0.0;
 double rollkd = 0.0;
 PID rollPID(&rollInput, &rollOutput, &rollSetpoint, rollkp, rollki, rollkd, DIRECT);
@@ -116,7 +119,8 @@ void serveLogs() {
         "pitchIn,pitchOut,pitchSetpt,"
         "rollIn,rollOut,rollSetpt,"
         "yawIn,yawOut,yawSetpt,"
-        "motorTL,motorTR,motorBL,motorBR\n"
+        "motorTL,motorTR,motorBL,motorBR,"
+        "velX,velY,velZ\n"
     );
     char line[256];
     for (int i = 0; i < logCount; i++) {
@@ -126,13 +130,15 @@ void serveLogs() {
             "%.4f,%.4f,%.4f,"
             "%.4f,%.4f,%.4f,"
             "%.4f,%.4f,%.4f,"
-            "%.4f,%.4f,%.4f,%.4f\n",
+            "%.4f,%.4f,%.4f,%.4f,"
+            "%.4f,%.4f,%.4f\n",
             (unsigned long)e.timestamp,
             e.yaw, e.pitch, e.roll,
             e.pitchIn, e.pitchOut, e.pitchSetpt,
             e.rollIn, e.rollOut, e.rollSetpt,
             e.yawIn, e.yawOut, e.yawSetpt,
-            e.motorTL, e.motorTR, e.motorBL, e.motorBR);
+            e.motorTL, e.motorTR, e.motorBL, e.motorBR,
+            e.velX, e.velY, e.velZ);
         webServer.sendContent(line);
     }
     webServer.sendContent("");
@@ -180,20 +186,37 @@ void stopMotors() {
 
 void updateIMU() {
     if (bno085.getSensorEvent(&sensorValue)) {
-        float qw = sensorValue.un.rotationVector.real;
-        float qx = sensorValue.un.rotationVector.i;
-        float qy = sensorValue.un.rotationVector.j;
-        float qz = sensorValue.un.rotationVector.k;
+        if (sensorValue.sensorId == SH2_ROTATION_VECTOR) {
+            float qw = sensorValue.un.rotationVector.real;
+            float qx = sensorValue.un.rotationVector.i;
+            float qy = sensorValue.un.rotationVector.j;
+            float qz = sensorValue.un.rotationVector.k;
 
-        yaw   = toDegrees(atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)));
-        pitch = toDegrees(asin(2.0 * (qw * qy - qz * qx)));
-        roll  = toDegrees(atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy)));
+            yaw   = toDegrees(atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)));
+            pitch = toDegrees(asin(2.0 * (qw * qy - qz * qx)));
+            roll  = toDegrees(atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy)));
+            roll -= 180.0;
+            if (roll < -180.0) roll += 360.0;
+        } else if (sensorValue.sensorId == SH2_GYROSCOPE_CALIBRATED) {
+            // Y axis = pitch rate — swap to gyroscope.x if IMU is mounted 90° rotated
+            gyroPitch = toDegrees(sensorValue.un.gyroscope.y);
+        } else if (sensorValue.sensorId == SH2_LINEAR_ACCELERATION) {
+            unsigned long now = millis();
+            if (lastAccelTime > 0) {
+                float dt = (now - lastAccelTime) / 1000.0f;
+                velX += sensorValue.un.linearAcceleration.x * dt;
+                velY += sensorValue.un.linearAcceleration.y * dt;
+                velZ += sensorValue.un.linearAcceleration.z * dt;
+            }
+            lastAccelTime = now;
+        }
     }
 }
 
 void updatePID() {
     yawPID.Compute();
-    pitchPID.Compute();
+    pitchOutput = pitchkp * (pitchSetpoint - pitch) - pitchkd * gyroPitch;
+    pitchOutput = constrain(pitchOutput, -0.5, 0.5);
     rollPID.Compute();
 }
 
@@ -215,6 +238,24 @@ double calculateError(double current, double target) {
     return error;
 }
 
+void stabilize() {
+    updateIMU();
+
+    pitchOutput = constrain(pitchkp * (pitchSetpoint - pitch) - pitchkd * gyroPitch, -stabilizeSpeed, stabilizeSpeed);
+    rollInput = roll;
+    rollPID.Compute();
+
+    float tl = stabilizeSpeed - pitchOutput - rollOutput;
+    float tr = stabilizeSpeed - pitchOutput + rollOutput;
+    float bl = stabilizeSpeed + pitchOutput + rollOutput;
+    float br = stabilizeSpeed + pitchOutput - rollOutput;
+
+    topLeftMotor.setSpeed(tl);
+    topRightMotor.setSpeed(tr);
+    bottomLeftMotor.setSpeed(bl);
+    bottomRightMotor.setSpeed(br);
+}
+
 void path() {
     updateIMU();
 
@@ -222,16 +263,15 @@ void path() {
 
     double yawError = -calculateError(yaw, heading);
 
-    pitchInput = pitch;
     yawInput = -yawError;
     rollInput = roll;
 
     updatePID();
 
-    float tl = baseSpeed - pitchOutput + yawOutput + rollOutput;
-    float tr = baseSpeed - pitchOutput - yawOutput - rollOutput;
-    float bl = baseSpeed + pitchOutput + yawOutput - rollOutput;
-    float br = baseSpeed + pitchOutput - yawOutput + rollOutput;
+    float tl = baseSpeed - pitchOutput + yawOutput - rollOutput;
+    float tr = baseSpeed - pitchOutput - yawOutput + rollOutput;
+    float bl = baseSpeed + pitchOutput + yawOutput + rollOutput;
+    float br = baseSpeed + pitchOutput - yawOutput - rollOutput;
 
     bottomLeftMotor.setSpeed(bl);
     bottomRightMotor.setSpeed(br);
@@ -242,10 +282,11 @@ void path() {
         LogEntry& e = logBuffer[logCount++];
         e.timestamp  = millis();
         e.yaw        = (float)yaw;         e.pitch      = (float)pitch;       e.roll       = (float)roll;
-        e.pitchIn    = (float)pitchInput;  e.pitchOut   = (float)pitchOutput; e.pitchSetpt = (float)pitchSetpoint;
+        e.pitchIn    = (float)pitch;        e.pitchOut   = (float)pitchOutput; e.pitchSetpt = (float)pitchSetpoint;
         e.rollIn     = (float)rollInput;   e.rollOut    = (float)rollOutput;  e.rollSetpt  = (float)rollSetpoint;
         e.yawIn      = (float)yawInput;    e.yawOut     = (float)yawOutput;   e.yawSetpt   = (float)yawSetpoint;
         e.motorTL = tl; e.motorTR = tr; e.motorBL = bl; e.motorBR = br;
+        e.velX = (float)velX; e.velY = (float)velY; e.velZ = (float)velZ;
     }
 }
 
@@ -266,14 +307,14 @@ void setup() {
     }
 
     bno085.enableReport(SH2_ROTATION_VECTOR, 10000);
+    bno085.enableReport(SH2_GYROSCOPE_CALIBRATED, 10000);
+    bno085.enableReport(SH2_LINEAR_ACCELERATION, 10000);
 
     // PID Setup
     rollPID.SetMode(AUTOMATIC);
-    pitchPID.SetMode(AUTOMATIC);
     yawPID.SetMode(AUTOMATIC);
 
     rollPID.SetOutputLimits(-0.5, 0.5);
-    pitchPID.SetOutputLimits(-1, 1);
     yawPID.SetOutputLimits(-0.5, 0.5);
 
     //Pin configurations
@@ -300,19 +341,21 @@ void loop() {
             if (!wifiConnected) connectToWiFi();
             if (reedSwitch.isPressed()) {
                 Serial.println(">>> Transitioning Idle -> Armed");
+                WiFi.disconnect();
+                wifiConnected = false;
                 runState = RunState::Armed;
             }
             break;
 
         case RunState::Armed:
-            WiFi.disconnect();
-            wifiConnected = false;
-            updateIMU();
+            stabilize();
             armedBeep();
             if (reedSwitch.released()) {
                 if (yaw < 0) yaw += 360.0;
                 heading = yaw;
                 logCount = 0;
+                velX = velY = velZ = 0.0;
+                lastAccelTime = 0;
                 Serial.printf(">>> Transitioning Armed -> Running | Captured heading: %.1f\n", heading);
                 digitalWrite(BUZZER_PIN, LOW);
                 timer = millis() + pathTime;
