@@ -159,16 +159,16 @@ class App:
         ax3.legend(lines3, [l.get_label() for l in lines3], loc="upper right", fontsize=8)
         ax3.grid(True, alpha=0.4)
 
-        # --- Velocity ---
+        # --- Motor outputs ---
         ax4 = self.fig.add_subplot(4, 1, 4)
-        ax4.plot(t, d["velX"], label="velX", color="mediumseagreen")
-        ax4.plot(t, d["velY"], label="velY", color="mediumpurple")
-        ax4.plot(t, d["velZ"], label="velZ", color="coral")
-        ax4.axhline(0, color="gray", linestyle="--", linewidth=0.8)
-        self._center_zero(ax4, d["velX"], d["velY"], d["velZ"])
-        ax4.set_ylabel("Velocity (m/s)")
-        ax4.set_title("Velocity")
+        ax4.plot(t, d["motorTL"], label="TL", color="steelblue")
+        ax4.plot(t, d["motorTR"], label="TR", color="tomato")
+        ax4.plot(t, d["motorBL"], label="BL", color="mediumseagreen")
+        ax4.plot(t, d["motorBR"], label="BR", color="mediumpurple")
+        ax4.set_ylabel("Throttle (0–1)")
+        ax4.set_title("Motor Outputs")
         ax4.set_xlabel("Time (s)")
+        ax4.set_ylim(0, 1)
         ax4.legend(loc="upper right", fontsize=8)
         ax4.grid(True, alpha=0.4)
 

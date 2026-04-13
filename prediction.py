@@ -12,6 +12,7 @@ SHEET_ID     = "1cS6S8ULz608Zomaz527y1Dg4Eam2BbXB60R-wgyfbHs"
 THRUST_GOAL  = 650    # g
 AMP_LIMIT    = 14     # A
 EXTRAP_PITCH = 100    # how far to extrapolate pitch beyond tested data
+EXTRAP_DIAM  = 60     # how far to extrapolate diameter beyond tested data
 MIN_POINTS   = 1      # minimum data points needed to attempt fitting
 
 # ─── Load ─────────────────────────────────────────────────────────────────────
@@ -48,6 +49,7 @@ diam_colors = {
 
 # ─── Process each blade count ─────────────────────────────────────────────────
 all_blade_counts = sorted(df["Blades"].unique())
+best_per_blade = {}  # blades -> best result dict
 
 for blades in all_blade_counts:
     sub = df[df.Blades == blades].copy()
@@ -285,7 +287,8 @@ for blades in all_blade_counts:
         print(f"\n  ✗ Cannot run 2D optimum search — physics model unavailable.")
         continue
 
-    diam_range_grid  = np.linspace(sub.Diameter.min(), sub.Diameter.max(), 400)
+    data_max_diam    = sub["Diameter"].max()
+    diam_range_grid  = np.linspace(sub.Diameter.min(), max(data_max_diam, EXTRAP_DIAM), 400)
     pitch_range_grid = np.linspace(sub.Pitch.min(), EXTRAP_PITCH, 400)
     DG, PG   = np.meshgrid(diam_range_grid, pitch_range_grid)
     D_flat   = DG.ravel()
@@ -293,27 +296,37 @@ for blades in all_blade_counts:
     T_grid   = thrust_phys((D_flat, P_flat), *pt)
     A_grid   = amps_phys((D_flat, P_flat), *pa)
 
-    valid_mask = (T_grid >= THRUST_GOAL) & (A_grid < AMP_LIMIT)
-    score_grid = D_flat - P_flat
+    valid_mask = A_grid < AMP_LIMIT
+    score_grid = -T_grid.copy()
     score_grid[~valid_mask] = np.inf
 
     if np.isinf(score_grid).all():
-        print(f"\n  ✗ No combination meets both goals within the modeled range.")
+        print(f"\n  ✗ No combination stays under {AMP_LIMIT}A within the modeled range.")
         continue
 
     best_i = np.argmin(score_grid)
     best_d = D_flat[best_i]; best_p = P_flat[best_i]
     best_t = T_grid[best_i]; best_a = A_grid[best_i]
-    extrap = " [EXTRAPOLATED]" if best_p > data_max_pitch else ""
+    diam_extrap  = best_d > data_max_diam
+    pitch_extrap = best_p > data_max_pitch
+    extrap_parts = (["diam"] if diam_extrap else []) + (["pitch"] if pitch_extrap else [])
+    extrap = f" [EXTRAPOLATED: {'+'.join(extrap_parts)}]" if extrap_parts else ""
 
-    print(f"\n  2D Optimum — Physics model (smallest D, highest P, goals met)")
+    best_per_blade[blades] = dict(
+        blades=blades, diameter=best_d, pitch=best_p,
+        thrust=best_t, amps=best_a,
+        thrust_std=phys_t_std, amps_std=phys_a_std,
+        diam_extrap=diam_extrap, pitch_extrap=pitch_extrap,
+    )
+
+    print(f"\n  Best config — highest thrust under {AMP_LIMIT}A (Physics model)")
     print(f"  {'─'*45}")
     print(f"  Diameter : {best_d:.1f} in")
     print(f"  Pitch    : {best_p:.1f} in{extrap}")
-    print(f"  Thrust   : {best_t:.0f} g  (±{phys_t_std:.0f}g)  goal ≥{THRUST_GOAL}g")
+    print(f"  Thrust   : {best_t:.0f} g  (±{phys_t_std:.0f}g)")
     print(f"  Amps     : {best_a:.2f} A  (±{phys_a_std:.2f}A)  limit <{AMP_LIMIT}A")
 
-    print(f"\n  Top 15 predicted configs (goals met, best score first):")
+    print(f"\n  Top 15 predicted configs (under {AMP_LIMIT}A, highest thrust first):")
     print(f"  {'Diam':>6}  {'Pitch':>6}  {'Thrust':>9}  {'Amps':>7}  Note")
     print(f"  {'─'*58}")
 
@@ -327,7 +340,8 @@ for blades in all_blade_counts:
             continue
         seen.append((d, p))
         t, a = T_grid[idx], A_grid[idx]
-        note = "[extrapolated]" if p > data_max_pitch else "within data range"
+        ep = (["diam"] if d > data_max_diam else []) + (["pitch"] if p > data_max_pitch else [])
+        note = f"[extrapolated: {'+'.join(ep)}]" if ep else "within data range"
         print(f"  {d:>6.1f}  {p:>6.1f}  {t:>7.0f}g  {a:>5.2f}A  {note}")
         count += 1
         if count >= 15:
@@ -336,4 +350,22 @@ for blades in all_blade_counts:
     print(f"  {'─'*58}")
     print(f"  Uncertainty on all predictions: ±{phys_t_std:.0f}g / ±{phys_a_std:.2f}A")
 
+print(f"\n{'═'*65}")
+print(f"  SUMMARY — Best per blade count (highest thrust under {AMP_LIMIT}A)")
+print(f"{'═'*65}")
+if best_per_blade:
+    print(f"  {'Blades':>6}  {'Diam':>6}  {'Pitch':>6}  {'Thrust':>9}  {'Amps':>7}  Note")
+    print(f"  {'─'*65}")
+    for b, r in sorted(best_per_blade.items()):
+        ep = (["diam"] if r['diam_extrap'] else []) + (["pitch"] if r['pitch_extrap'] else [])
+        note = f"[extrapolated: {'+'.join(ep)}]" if ep else "within data range"
+        print(f"  {b:>6}  {r['diameter']:>6.1f}  {r['pitch']:>6.1f}  {r['thrust']:>7.0f}g  {r['amps']:>5.2f}A  {note}")
+    print(f"  {'─'*65}")
+    overall = max(best_per_blade.values(), key=lambda r: r['thrust'])
+    ep = (["diam"] if overall['diam_extrap'] else []) + (["pitch"] if overall['pitch_extrap'] else [])
+    note = f"[extrapolated: {'+'.join(ep)}]" if ep else "within data range"
+    print(f"\n  ★ OVERALL BEST: {int(overall['blades'])}-blade  |  {overall['diameter']:.1f}\" diam  |  {overall['pitch']:.1f}\" pitch  {note}")
+    print(f"    Thrust: {overall['thrust']:.0f}g (±{overall['thrust_std']:.0f}g)  |  Amps: {overall['amps']:.2f}A (±{overall['amps_std']:.2f}A)")
+else:
+    print("  No valid configurations found across any blade count.")
 print(f"\n{'═'*65}\n  Done.\n{'═'*65}\n")

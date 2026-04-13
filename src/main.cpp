@@ -39,10 +39,10 @@ struct LogEntry {
     float rollIn, rollOut, rollSetpt;
     float yawIn, yawOut, yawSetpt;
     float motorTL, motorTR, motorBL, motorBR;
-    float velX, velY, velZ;
 };
 
-static const int LOG_BUFFER_SIZE = 1000;
+// 50 Hz × 6 s run = 300 samples; 350 gives a small margin
+static const int LOG_BUFFER_SIZE = 350;
 LogEntry logBuffer[LOG_BUFFER_SIZE];
 int logCount = 0;
 
@@ -66,29 +66,32 @@ unsigned long lastAccelTime = 0;
 sh2_SensorValue_t sensorValue;
 
 // Timing
-static const double pathTime = 6000;
-unsigned long timer = 0;
+static const double ARC_DEGREES      = 45.0;  // degrees left at end of arc
+static const double pathTime = 8000;
+unsigned long timer    = 0;
+unsigned long runStart = 0;
 
 // PIDs
-static double baseSpeed = 0.7;
 static double stabilizeSpeed = 0.15;
 
 // Yaw PID
 double yawInput, yawOutput, yawSetpoint;
 
-double yawkp = 0.05;
+double yawkp = 0.018;
 double yawki = 0.0;
 double yawkd = 0.0;
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, yawkp, yawki, yawkd, DIRECT);
 
 // Pitch PD — P on angle error (targets level), D on gyro rate (fast response)
-double pitchOutput, pitchSetpoint = 2.0;
-double pitchkp = 0.03;
+static const double BASE_PITCH_DEG    = 0.5;  // level-flight pitch setpoint
+static const double SURFACE_PITCH_DEG = 5.0;  // pitch setpoint during arc
+double pitchOutput, pitchSetpoint = BASE_PITCH_DEG;
+double pitchkp = 0.05;
 double pitchkd = 0.001;
 
 // Roll PID
 double rollInput, rollOutput, rollSetpoint;
-double rollkp = 0.01;
+double rollkp = 0.05;
 double rollki = 0.0;
 double rollkd = 0.0;
 PID rollPID(&rollInput, &rollOutput, &rollSetpoint, rollkp, rollki, rollkd, DIRECT);
@@ -119,8 +122,7 @@ void serveLogs() {
         "pitchIn,pitchOut,pitchSetpt,"
         "rollIn,rollOut,rollSetpt,"
         "yawIn,yawOut,yawSetpt,"
-        "motorTL,motorTR,motorBL,motorBR,"
-        "velX,velY,velZ\n"
+        "motorTL,motorTR,motorBL,motorBR\n"
     );
     char line[256];
     for (int i = 0; i < logCount; i++) {
@@ -130,15 +132,13 @@ void serveLogs() {
             "%.4f,%.4f,%.4f,"
             "%.4f,%.4f,%.4f,"
             "%.4f,%.4f,%.4f,"
-            "%.4f,%.4f,%.4f,%.4f,"
-            "%.4f,%.4f,%.4f\n",
+            "%.4f,%.4f,%.4f,%.4f\n",
             (unsigned long)e.timestamp,
             e.yaw, e.pitch, e.roll,
             e.pitchIn, e.pitchOut, e.pitchSetpt,
             e.rollIn, e.rollOut, e.rollSetpt,
             e.yawIn, e.yawOut, e.yawSetpt,
-            e.motorTL, e.motorTR, e.motorBL, e.motorBR,
-            e.velX, e.velY, e.velZ);
+            e.motorTL, e.motorTR, e.motorBL, e.motorBR);
         webServer.sendContent(line);
     }
     webServer.sendContent("");
@@ -184,33 +184,36 @@ void stopMotors() {
 }
 
 
-void updateIMU() {
-    if (bno085.getSensorEvent(&sensorValue)) {
-        if (sensorValue.sensorId == SH2_ROTATION_VECTOR) {
-            float qw = sensorValue.un.rotationVector.real;
-            float qx = sensorValue.un.rotationVector.i;
-            float qy = sensorValue.un.rotationVector.j;
-            float qz = sensorValue.un.rotationVector.k;
+// Returns true when a fresh rotation vector was received (use to gate logging)
+bool updateIMU() {
+    if (!bno085.getSensorEvent(&sensorValue)) return false;
 
-            yaw   = toDegrees(atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)));
-            pitch = toDegrees(asin(2.0 * (qw * qy - qz * qx)));
-            roll  = toDegrees(atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy)));
-            roll -= 180.0;
-            if (roll < -180.0) roll += 360.0;
-        } else if (sensorValue.sensorId == SH2_GYROSCOPE_CALIBRATED) {
-            // Y axis = pitch rate — swap to gyroscope.x if IMU is mounted 90° rotated
-            gyroPitch = toDegrees(sensorValue.un.gyroscope.y);
-        } else if (sensorValue.sensorId == SH2_LINEAR_ACCELERATION) {
-            unsigned long now = millis();
-            if (lastAccelTime > 0) {
-                float dt = (now - lastAccelTime) / 1000.0f;
-                velX += sensorValue.un.linearAcceleration.x * dt;
-                velY += sensorValue.un.linearAcceleration.y * dt;
-                velZ += sensorValue.un.linearAcceleration.z * dt;
-            }
-            lastAccelTime = now;
+    if (sensorValue.sensorId == SH2_ROTATION_VECTOR) {
+        float qw = sensorValue.un.rotationVector.real;
+        float qx = sensorValue.un.rotationVector.i;
+        float qy = sensorValue.un.rotationVector.j;
+        float qz = sensorValue.un.rotationVector.k;
+
+        yaw   = toDegrees(atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)));
+        pitch = toDegrees(asin(2.0 * (qw * qy - qz * qx)));
+        roll  = toDegrees(atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy)));
+        roll -= 180.0;
+        if (roll < -180.0) roll += 360.0;
+        return true;
+    } else if (sensorValue.sensorId == SH2_GYROSCOPE_CALIBRATED) {
+        // Y axis = pitch rate — swap to gyroscope.x if IMU is mounted 90° rotated
+        gyroPitch = toDegrees(sensorValue.un.gyroscope.y);
+    } else if (sensorValue.sensorId == SH2_LINEAR_ACCELERATION) {
+        unsigned long now = millis();
+        if (lastAccelTime > 0) {
+            float dt = (now - lastAccelTime) / 1000.0f;
+            velX += sensorValue.un.linearAcceleration.x * dt;
+            velY += sensorValue.un.linearAcceleration.y * dt;
+            velZ += sensorValue.un.linearAcceleration.z * dt;
         }
+        lastAccelTime = now;
     }
+    return false;
 }
 
 void updatePID() {
@@ -257,28 +260,43 @@ void stabilize() {
 }
 
 void path() {
-    updateIMU();
+    bool newRotation = updateIMU();
 
     if (yaw < 0) yaw += 360.0;
 
-    double yawError = -calculateError(yaw, heading);
+    // Arc and surface over the entire run
+    unsigned long elapsed = millis() - runStart;
+    double t = (double)elapsed / pathTime;
+    if (t > 1.0) t = 1.0;
+    double currentHeading = heading + t * ARC_DEGREES;
+    pitchSetpoint = BASE_PITCH_DEG + t * (SURFACE_PITCH_DEG - BASE_PITCH_DEG);
+
+    double yawError = -calculateError(yaw, currentHeading);
 
     yawInput = -yawError;
     rollInput = roll;
 
     updatePID();
 
-    float tl = baseSpeed - pitchOutput + yawOutput - rollOutput;
-    float tr = baseSpeed - pitchOutput - yawOutput + rollOutput;
-    float bl = baseSpeed + pitchOutput + yawOutput + rollOutput;
-    float br = baseSpeed + pitchOutput - yawOutput - rollOutput;
+    // Raw correction per motor (no base — will be normalised below)
+    float c_tl = -pitchOutput + yawOutput - rollOutput;
+    float c_tr = -pitchOutput - yawOutput + rollOutput;
+    float c_bl =  pitchOutput + yawOutput + rollOutput;
+    float c_br =  pitchOutput - yawOutput - rollOutput;
+
+    // Shift so the fastest motor runs at 1.0; others are reduced from there
+    float maxC = max(max(c_tl, c_tr), max(c_bl, c_br));
+    float tl = 1.0f - (maxC - c_tl);
+    float tr = 1.0f - (maxC - c_tr);
+    float bl = 1.0f - (maxC - c_bl);
+    float br = 1.0f - (maxC - c_br);
 
     bottomLeftMotor.setSpeed(bl);
     bottomRightMotor.setSpeed(br);
     topLeftMotor.setSpeed(tl);
     topRightMotor.setSpeed(tr);
 
-    if (logCount < LOG_BUFFER_SIZE) {
+    if (newRotation && logCount < LOG_BUFFER_SIZE) {
         LogEntry& e = logBuffer[logCount++];
         e.timestamp  = millis();
         e.yaw        = (float)yaw;         e.pitch      = (float)pitch;       e.roll       = (float)roll;
@@ -286,7 +304,6 @@ void path() {
         e.rollIn     = (float)rollInput;   e.rollOut    = (float)rollOutput;  e.rollSetpt  = (float)rollSetpoint;
         e.yawIn      = (float)yawInput;    e.yawOut     = (float)yawOutput;   e.yawSetpt   = (float)yawSetpoint;
         e.motorTL = tl; e.motorTR = tr; e.motorBL = bl; e.motorBR = br;
-        e.velX = (float)velX; e.velY = (float)velY; e.velZ = (float)velZ;
     }
 }
 
@@ -306,9 +323,9 @@ void setup() {
         Serial.println("Failed to initialize BNO08x!");
     }
 
-    bno085.enableReport(SH2_ROTATION_VECTOR, 10000);
-    bno085.enableReport(SH2_GYROSCOPE_CALIBRATED, 10000);
-    bno085.enableReport(SH2_LINEAR_ACCELERATION, 10000);
+    bno085.enableReport(SH2_ROTATION_VECTOR, 20000);
+    bno085.enableReport(SH2_GYROSCOPE_CALIBRATED, 20000);
+    bno085.enableReport(SH2_LINEAR_ACCELERATION, 20000);
 
     // PID Setup
     rollPID.SetMode(AUTOMATIC);
@@ -358,7 +375,8 @@ void loop() {
                 lastAccelTime = 0;
                 Serial.printf(">>> Transitioning Armed -> Running | Captured heading: %.1f\n", heading);
                 digitalWrite(BUZZER_PIN, LOW);
-                timer = millis() + pathTime;
+                runStart = millis();
+                timer = runStart + (unsigned long)pathTime;
                 runState = RunState::Running;
             }
             break;
