@@ -67,7 +67,7 @@ sh2_SensorValue_t sensorValue;
 
 // Timing
 static const double ARC_DEGREES      = 45.0;  // degrees left at end of arc
-static const double pathTime = 8000;
+static const double pathTime = 9000;
 unsigned long timer    = 0;
 unsigned long runStart = 0;
 
@@ -77,14 +77,15 @@ static double stabilizeSpeed = 0.15;
 // Yaw PID
 double yawInput, yawOutput, yawSetpoint;
 
-double yawkp = 0.018;
+double yawkp = 0.02;
 double yawki = 0.0;
 double yawkd = 0.0;
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, yawkp, yawki, yawkd, DIRECT);
 
 // Pitch PD — P on angle error (targets level), D on gyro rate (fast response)
 static const double BASE_PITCH_DEG    = 0.5;  // level-flight pitch setpoint
-static const double SURFACE_PITCH_DEG = 5.0;  // pitch setpoint during arc
+static const double SURFACE_PITCH_DEG  = 10.0;   // pitch setpoint after surface trigger
+static const double SURFACE_START_MS  = 8900;  // ms into the run to start surfacing
 double pitchOutput, pitchSetpoint = BASE_PITCH_DEG;
 double pitchkp = 0.05;
 double pitchkd = 0.001;
@@ -268,8 +269,9 @@ void path() {
     unsigned long elapsed = millis() - runStart;
     double t = (double)elapsed / pathTime;
     if (t > 1.0) t = 1.0;
-    double currentHeading = heading + t * ARC_DEGREES;
-    pitchSetpoint = BASE_PITCH_DEG + t * (SURFACE_PITCH_DEG - BASE_PITCH_DEG);
+    double currentHeading = fmod(heading + t * ARC_DEGREES, 360.0);
+    if (currentHeading < 0) currentHeading += 360.0;
+    pitchSetpoint = (elapsed >= (unsigned long)SURFACE_START_MS) ? SURFACE_PITCH_DEG : BASE_PITCH_DEG;
 
     double yawError = -calculateError(yaw, currentHeading);
 

@@ -111,15 +111,14 @@ class App:
         # --- Pitch ---
         ax1 = self.fig.add_subplot(4, 1, 1)
         ax1.plot(t, d["pitch"], label="pitch (actual)", color="steelblue")
-        ax1.axhline(d["pitchSetpt"][0], color="tomato", linestyle="--",
-                    label=f"setpoint ({d['pitchSetpt'][0]:.1f}°)")
+        ax1.plot(t, d["pitchSetpt"], color="tomato", linestyle="--", label="setpoint")
         ax1_r = ax1.twinx()
         ax1_r.plot(t, d["pitchOut"], color="orange", alpha=0.6, linewidth=1, label="PID output")
         ax1_r.set_ylabel("Output", color="orange")
         ax1_r.tick_params(axis="y", labelcolor="orange")
         ax1.set_ylabel("Pitch (°)")
         ax1.set_title("Pitch")
-        self._center_zero(ax1,  d["pitch"], [d["pitchSetpt"][0]])
+        self._center_zero(ax1,  d["pitch"], d["pitchSetpt"])
         self._center_zero(ax1_r, d["pitchOut"])
         lines1 = ax1.get_lines() + ax1_r.get_lines()
         ax1.legend(lines1, [l.get_label() for l in lines1], loc="upper right", fontsize=8)
@@ -143,18 +142,19 @@ class App:
         ax2.grid(True, alpha=0.4)
 
         # --- Yaw ---
+        # Reconstruct heading setpoint: the firmware feeds (currentHeading - yaw) as yawIn,
+        # so currentHeading = yaw + yawIn
+        heading_setpt = [y + yi for y, yi in zip(d["yaw"], d["yawIn"])]
         ax3 = self.fig.add_subplot(4, 1, 3)
-        ax3.plot(t, d["yawIn"], label="yaw error (actual)", color="steelblue")
-        ax3.axhline(d["yawSetpt"][0], color="tomato", linestyle="--",
-                    label=f"setpoint ({d['yawSetpt'][0]:.1f}°)")
+        ax3.plot(t, d["yaw"], label="yaw (actual)", color="steelblue")
+        ax3.plot(t, heading_setpt, color="tomato", linestyle="--", label="heading setpoint")
         ax3_r = ax3.twinx()
         ax3_r.plot(t, d["yawOut"], color="orange", alpha=0.6, linewidth=1, label="PID output")
         ax3_r.set_ylabel("Output", color="orange")
         ax3_r.tick_params(axis="y", labelcolor="orange")
         ax3.set_ylabel("Yaw (°)")
         ax3.set_title("Yaw")
-        self._center_zero(ax3,  d["yawIn"], [d["yawSetpt"][0]])
-        self._center_zero(ax3_r, d["yawOut"])
+        ax3_r.set_ylim(-0.5, 0.5)
         lines3 = ax3.get_lines() + ax3_r.get_lines()
         ax3.legend(lines3, [l.get_label() for l in lines3], loc="upper right", fontsize=8)
         ax3.grid(True, alpha=0.4)
