@@ -66,33 +66,38 @@ unsigned long lastAccelTime = 0;
 sh2_SensorValue_t sensorValue;
 
 // Timing
-static const double ARC_DEGREES      = 45.0;  // degrees left at end of arc
-static const double pathTime = 9000;
+static const double PICKUP_PITCH_DEG  = 45.0;  // pitch threshold for pickup detection
+static const double RECOVERY_DEGREES  = 45.0;  // degrees left to turn in recovery
+static const double RECOVERY_TIME_MS  = 5000;  // max recovery duration before stopping
+static const unsigned long RAMP_UP_MS = 750;   // acceleration ramp from stabilize to full speed
+static const double MID_TURN_DEG     = 25.0;  // degrees to turn mid-run
+static const unsigned long MID_TURN_MS = 1000; // ms into run to start mid-turn
+static const double pathTime = 4500;
 unsigned long timer    = 0;
 unsigned long runStart = 0;
+unsigned long recoveryTimer = 0;
+double recoveryHeading = 0.0;
 
 // PIDs
-static double stabilizeSpeed = 0.15;
+static double stabilizeSpeed = 0.08;
 
 // Yaw PID
 double yawInput, yawOutput, yawSetpoint;
 
-double yawkp = 0.02;
-double yawki = 0.0;
+double yawkp = 0.025;
+double yawki = 0.005;
 double yawkd = 0.0;
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, yawkp, yawki, yawkd, DIRECT);
 
 // Pitch PD — P on angle error (targets level), D on gyro rate (fast response)
 static const double BASE_PITCH_DEG    = 0.5;  // level-flight pitch setpoint
-static const double SURFACE_PITCH_DEG  = 10.0;   // pitch setpoint after surface trigger
-static const double SURFACE_START_MS  = 8900;  // ms into the run to start surfacing
 double pitchOutput, pitchSetpoint = BASE_PITCH_DEG;
-double pitchkp = 0.05;
+double pitchkp = 0.04;
 double pitchkd = 0.001;
 
 // Roll PID
 double rollInput, rollOutput, rollSetpoint;
-double rollkp = 0.05;
+double rollkp = 0.03;
 double rollki = 0.0;
 double rollkd = 0.0;
 PID rollPID(&rollInput, &rollOutput, &rollSetpoint, rollkp, rollki, rollkd, DIRECT);
@@ -101,6 +106,7 @@ enum class RunState {
     Idle,
     Armed,
     Running,
+    Recovery,
     Finished
 };
 
@@ -260,20 +266,14 @@ void stabilize() {
     bottomRightMotor.setSpeed(br);
 }
 
-void path() {
+void runMotors(double targetHeading, float maxSpeed = 1.0f) {
     bool newRotation = updateIMU();
 
     if (yaw < 0) yaw += 360.0;
 
-    // Arc and surface over the entire run
-    unsigned long elapsed = millis() - runStart;
-    double t = (double)elapsed / pathTime;
-    if (t > 1.0) t = 1.0;
-    double currentHeading = fmod(heading + t * ARC_DEGREES, 360.0);
-    if (currentHeading < 0) currentHeading += 360.0;
-    pitchSetpoint = (elapsed >= (unsigned long)SURFACE_START_MS) ? SURFACE_PITCH_DEG : BASE_PITCH_DEG;
+    pitchSetpoint = BASE_PITCH_DEG;
 
-    double yawError = -calculateError(yaw, currentHeading);
+    double yawError = -calculateError(yaw, targetHeading);
 
     yawInput = -yawError;
     rollInput = roll;
@@ -286,12 +286,31 @@ void path() {
     float c_bl =  pitchOutput + yawOutput + rollOutput;
     float c_br =  pitchOutput - yawOutput - rollOutput;
 
-    // Shift so the fastest motor runs at 1.0; others are reduced from there
+    // Normalise into [0, 1] — fastest motor at 1.0, preserve all differentials
     float maxC = max(max(c_tl, c_tr), max(c_bl, c_br));
-    float tl = 1.0f - (maxC - c_tl);
-    float tr = 1.0f - (maxC - c_tr);
-    float bl = 1.0f - (maxC - c_bl);
-    float br = 1.0f - (maxC - c_br);
+    float minC = min(min(c_tl, c_tr), min(c_bl, c_br));
+    float range = maxC - minC;
+
+    float tl, tr, bl, br;
+    if (range > 1.0f) {
+        // Corrections too wide — scale to preserve ratios
+        float s = 1.0f / range;
+        tl = (c_tl - minC) * s;
+        tr = (c_tr - minC) * s;
+        bl = (c_bl - minC) * s;
+        br = (c_br - minC) * s;
+    } else {
+        // Shift so fastest motor = 1.0, all others >= 0
+        tl = 1.0f - (maxC - c_tl);
+        tr = 1.0f - (maxC - c_tr);
+        bl = 1.0f - (maxC - c_bl);
+        br = 1.0f - (maxC - c_br);
+    }
+
+    tl *= maxSpeed;
+    tr *= maxSpeed;
+    bl *= maxSpeed;
+    br *= maxSpeed;
 
     bottomLeftMotor.setSpeed(bl);
     bottomRightMotor.setSpeed(br);
@@ -334,7 +353,9 @@ void setup() {
     yawPID.SetMode(AUTOMATIC);
 
     rollPID.SetOutputLimits(-0.5, 0.5);
+    rollPID.SetSampleTime(20);
     yawPID.SetOutputLimits(-0.5, 0.5);
+    yawPID.SetSampleTime(20);
 
     //Pin configurations
     pinMode(BUZZER_PIN, OUTPUT);
@@ -384,11 +405,35 @@ void loop() {
             break;
 
         case RunState::Running:
-            if (millis() <= timer) {
-                path();
-            } else {
-                Serial.println(">>> Transitioning Running -> Finished");
+            if (fabs(pitch) > PICKUP_PITCH_DEG) {
+                Serial.println(">>> Pickup detected during run!");
                 runState = RunState::Finished;
+            } else if (millis() <= timer) {
+                unsigned long elapsed = millis() - runStart;
+                float ramp = (elapsed < RAMP_UP_MS)
+                    ? stabilizeSpeed + (1.0f - stabilizeSpeed) * ((float)elapsed / RAMP_UP_MS)
+                    : 1.0f;
+                double targetHeading = (elapsed >= MID_TURN_MS)
+                    ? fmod(heading + MID_TURN_DEG, 360.0)
+                    : heading;
+                runMotors(targetHeading, ramp);
+            } else {
+                recoveryHeading = fmod(heading + RECOVERY_DEGREES, 360.0);
+                recoveryTimer = millis() + (unsigned long)RECOVERY_TIME_MS;
+                Serial.printf(">>> Transitioning Running -> Recovery | Recovery heading: %.1f\n", recoveryHeading);
+                runState = RunState::Recovery;
+            }
+            break;
+
+        case RunState::Recovery:
+            if (fabs(pitch) > PICKUP_PITCH_DEG) {
+                Serial.println(">>> Pickup detected during recovery!");
+                runState = RunState::Finished;
+            } else if (millis() > recoveryTimer) {
+                Serial.println(">>> Recovery timeout, stopping");
+                runState = RunState::Finished;
+            } else {
+                runMotors(recoveryHeading);
             }
             break;
 
