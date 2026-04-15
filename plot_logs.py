@@ -144,7 +144,7 @@ class App:
         # --- Yaw ---
         # Reconstruct heading setpoint: the firmware feeds (currentHeading - yaw) as yawIn,
         # so currentHeading = yaw + yawIn
-        heading_setpt = [y + yi for y, yi in zip(d["yaw"], d["yawIn"])]
+        heading_setpt = [((y + yi) % 360) for y, yi in zip(d["yaw"], d["yawIn"])]
         ax3 = self.fig.add_subplot(4, 1, 3)
         ax3.plot(t, d["yaw"], label="yaw (actual)", color="steelblue")
         ax3.plot(t, heading_setpt, color="tomato", linestyle="--", label="heading setpoint")

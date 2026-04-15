@@ -418,6 +418,15 @@ void loop() {
                 logCount = 0;
                 velX = velY = velZ = 0.0;
                 lastAccelTime = 0;
+
+                // Reset PID state so integral doesn't carry over from previous run
+                yawOutput = 0; yawInput = 0;
+                yawPID.SetMode(MANUAL);
+                yawPID.SetMode(AUTOMATIC);
+                rollOutput = 0; rollInput = 0;
+                rollPID.SetMode(MANUAL);
+                rollPID.SetMode(AUTOMATIC);
+
                 Serial.printf(">>> Transitioning Armed -> Running | Captured heading: %.1f\n", heading);
                 digitalWrite(BUZZER_PIN, LOW);
                 runStart = millis();
