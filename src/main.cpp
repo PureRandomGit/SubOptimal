@@ -21,6 +21,11 @@ Bounce2::Button reedSwitch = Bounce2::Button();
 static const uint8_t BUZZER_PIN = 8;
 double heading = 0.0;
 
+// Battery voltage — 47k/10k divider on ADC1 pin
+static const uint8_t VBAT_PIN = 2;
+static const float VDIV_RATIO = 5.7f;   // (47k + 10k) / 10k
+static const float VBAT_CAL   = 1.021f; // calibration factor for ADC/resistor tolerance
+
 // ESC timing
 static const int PWM_FREQ = 50;
 static const int PWM_RES_BITS = 10;
@@ -34,6 +39,8 @@ Motor bottomRightMotor(9, 3, PWM_FREQ, PWM_RES_BITS, 1.0f);
 // PID log buffer
 struct LogEntry {
     uint32_t timestamp;
+    uint8_t state;  // 0=Armed, 1=Running, 2=Recovery
+    float voltage;
     float yaw, pitch, roll;
     float pitchIn, pitchOut, pitchSetpt;
     float rollIn, rollOut, rollSetpt;
@@ -41,10 +48,12 @@ struct LogEntry {
     float motorTL, motorTR, motorBL, motorBR;
 };
 
-// 50 Hz × 6 s run = 300 samples; 350 gives a small margin
-static const int LOG_BUFFER_SIZE = 350;
+// 600 entries: room for armed stabilization + 5s run + recovery
+static const int LOG_BUFFER_SIZE = 600;
 LogEntry logBuffer[LOG_BUFFER_SIZE];
 int logCount = 0;
+int runCount = 0;              // increments each Armed->Running transition (per power cycle)
+unsigned long runEndTime = 0;  // set when run finishes for duration calc
 
 WebServer webServer(80);
 bool webServerStarted = false;
@@ -73,6 +82,8 @@ static const unsigned long RAMP_UP_MS = 500;   // acceleration ramp from stabili
 static const double MID_TURN_DEG     = 25.0;  // degrees to turn mid-run
 static const unsigned long MID_TURN_MS = 1000; // ms into run to start mid-turn
 static const double pathTime = 5000;
+static const double MAX_RIGHT_DEV_DEG = 30.0;  // abort if sub drifts this far right of heading
+static const double MAX_RIGHT_YAW_OUT = 0.15;  // cap rightward yaw correction (sub only goes straight/left)
 unsigned long timer = 0;
 unsigned long runStart = 0;
 unsigned long recoveryTimer = 0;
@@ -125,22 +136,26 @@ void serveLogs() {
     webServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
     webServer.send(200, "text/csv", "");
     webServer.sendContent(
-        "timestamp_ms,yaw,pitch,roll,"
+        "run_number,timestamp_ms,state,voltage,"
+        "yaw,pitch,roll,"
         "pitchIn,pitchOut,pitchSetpt,"
         "rollIn,rollOut,rollSetpt,"
         "yawIn,yawOut,yawSetpt,"
         "motorTL,motorTR,motorBL,motorBR\n"
     );
-    char line[256];
+    char line[300];
     for (int i = 0; i < logCount; i++) {
         const LogEntry& e = logBuffer[i];
         snprintf(line, sizeof(line),
-            "%lu,%.3f,%.3f,%.3f,"
+            "%d,%lu,%u,%.2f,"
+            "%.3f,%.3f,%.3f,"
             "%.4f,%.4f,%.4f,"
             "%.4f,%.4f,%.4f,"
             "%.4f,%.4f,%.4f,"
             "%.4f,%.4f,%.4f,%.4f\n",
+            runCount,
             (unsigned long)e.timestamp,
+            (unsigned)e.state, e.voltage,
             e.yaw, e.pitch, e.roll,
             e.pitchIn, e.pitchOut, e.pitchSetpt,
             e.rollIn, e.rollOut, e.rollSetpt,
@@ -149,6 +164,11 @@ void serveLogs() {
         webServer.sendContent(line);
     }
     webServer.sendContent("");
+
+    // Print run duration
+    if (runEndTime > 0 && runStart > 0) {
+        Serial.printf("Run duration: %.2f s\n", (runEndTime - runStart) / 1000.0f);
+    }
     chime(3, 100);
     Serial.printf("Served %d log entries\n", logCount);
 }
@@ -204,6 +224,11 @@ float toDegrees(double radians) {
     return radians * 180.0 / M_PI;
 }
 
+float readBatteryVoltage() {
+    int raw = analogRead(VBAT_PIN);
+    return (raw * 3.3f / 4095.0f) * VDIV_RATIO * VBAT_CAL;
+}
+
 void stopMotors() {
     bottomLeftMotor.stop();
     bottomRightMotor.stop();
@@ -216,11 +241,11 @@ void stopMotors() {
 bool updateIMU() {
     if (!bno085.getSensorEvent(&sensorValue)) return false;
 
-    if (sensorValue.sensorId == SH2_ROTATION_VECTOR) {
-        float qw = sensorValue.un.rotationVector.real;
-        float qx = sensorValue.un.rotationVector.i;
-        float qy = sensorValue.un.rotationVector.j;
-        float qz = sensorValue.un.rotationVector.k;
+    if (sensorValue.sensorId == SH2_GAME_ROTATION_VECTOR) {
+        float qw = sensorValue.un.gameRotationVector.real;
+        float qx = sensorValue.un.gameRotationVector.i;
+        float qy = sensorValue.un.gameRotationVector.j;
+        float qz = sensorValue.un.gameRotationVector.k;
 
         yaw   = toDegrees(atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)));
         pitch = toDegrees(asin(2.0 * (qw * qy - qz * qx)));
@@ -269,8 +294,21 @@ double calculateError(double current, double target) {
     return error;
 }
 
+void logEntry(uint8_t state, float tl, float tr, float bl, float br) {
+    if (logCount >= LOG_BUFFER_SIZE) return;
+    LogEntry& e = logBuffer[logCount++];
+    e.timestamp  = millis();
+    e.state      = state;
+    e.voltage    = readBatteryVoltage();
+    e.yaw        = (float)yaw;         e.pitch      = (float)pitch;       e.roll       = (float)roll;
+    e.pitchIn    = (float)pitch;        e.pitchOut   = (float)pitchOutput; e.pitchSetpt = (float)pitchSetpoint;
+    e.rollIn     = (float)rollInput;   e.rollOut    = (float)rollOutput;  e.rollSetpt  = (float)rollSetpoint;
+    e.yawIn      = (float)yawInput;    e.yawOut     = (float)yawOutput;   e.yawSetpt   = (float)yawSetpoint;
+    e.motorTL = tl; e.motorTR = tr; e.motorBL = bl; e.motorBR = br;
+}
+
 void stabilize() {
-    updateIMU();
+    bool newRotation = updateIMU();
 
     pitchOutput = constrain(pitchkp * (pitchSetpoint - pitch) - pitchkd * gyroPitch, -stabilizeSpeed, stabilizeSpeed);
     rollInput = roll;
@@ -285,9 +323,11 @@ void stabilize() {
     topRightMotor.setSpeed(tr);
     bottomLeftMotor.setSpeed(bl);
     bottomRightMotor.setSpeed(br);
+
+    if (newRotation) logEntry(0, tl, tr, bl, br);
 }
 
-void runMotors(double targetHeading, float maxSpeed = 1.0f) {
+void runMotors(double targetHeading, float maxSpeed = 1.0f, uint8_t logState = 1) {
     bool newRotation = updateIMU();
 
     if (yaw < 0) yaw += 360.0;
@@ -300,6 +340,9 @@ void runMotors(double targetHeading, float maxSpeed = 1.0f) {
     rollInput = roll;
 
     updatePID();
+
+    // Cap rightward yaw correction — sub only goes straight or left
+    if (yawOutput > MAX_RIGHT_YAW_OUT) yawOutput = MAX_RIGHT_YAW_OUT;
 
     // Raw correction per motor (no base — will be normalised below)
     float c_tl = -pitchOutput + yawOutput - rollOutput;
@@ -338,15 +381,7 @@ void runMotors(double targetHeading, float maxSpeed = 1.0f) {
     topLeftMotor.setSpeed(tl);
     topRightMotor.setSpeed(tr);
 
-    if (newRotation && logCount < LOG_BUFFER_SIZE) {
-        LogEntry& e = logBuffer[logCount++];
-        e.timestamp  = millis();
-        e.yaw        = (float)yaw;         e.pitch      = (float)pitch;       e.roll       = (float)roll;
-        e.pitchIn    = (float)pitch;        e.pitchOut   = (float)pitchOutput; e.pitchSetpt = (float)pitchSetpoint;
-        e.rollIn     = (float)rollInput;   e.rollOut    = (float)rollOutput;  e.rollSetpt  = (float)rollSetpoint;
-        e.yawIn      = (float)yawInput;    e.yawOut     = (float)yawOutput;   e.yawSetpt   = (float)yawSetpoint;
-        e.motorTL = tl; e.motorTR = tr; e.motorBL = bl; e.motorBR = br;
-    }
+    if (newRotation) logEntry(logState, tl, tr, bl, br);
 }
 
 void setup() {
@@ -365,7 +400,7 @@ void setup() {
         Serial.println("Failed to initialize BNO08x!");
     }
 
-    bno085.enableReport(SH2_ROTATION_VECTOR, 20000);
+    bno085.enableReport(SH2_GAME_ROTATION_VECTOR, 20000);  // no magnetometer — immune to motor interference
     bno085.enableReport(SH2_GYROSCOPE_CALIBRATED, 20000);
     bno085.enableReport(SH2_LINEAR_ACCELERATION, 20000);
 
@@ -381,6 +416,8 @@ void setup() {
     //Pin configurations
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
+    analogReadResolution(12);
+    pinMode(VBAT_PIN, INPUT);
 
     reedSwitch.attach(REED_SWITCH_PIN, INPUT_PULLUP);
     reedSwitch.interval(500);
@@ -405,6 +442,9 @@ void loop() {
                 WiFi.disconnect();
                 wifiConnected = false;
                 wifiConnecting = false;
+                logCount = 0;
+                runEndTime = 0;
+                yawInput = 0; yawOutput = 0;
                 runState = RunState::Armed;
             }
             break;
@@ -415,7 +455,6 @@ void loop() {
             if (reedSwitch.released()) {
                 if (yaw < 0) yaw += 360.0;
                 heading = yaw;
-                logCount = 0;
                 velX = velY = velZ = 0.0;
                 lastAccelTime = 0;
 
@@ -427,7 +466,8 @@ void loop() {
                 rollPID.SetMode(MANUAL);
                 rollPID.SetMode(AUTOMATIC);
 
-                Serial.printf(">>> Transitioning Armed -> Running | Captured heading: %.1f\n", heading);
+                runCount++;
+                Serial.printf(">>> Transitioning Armed -> Running | Run #%d | Captured heading: %.1f\n", runCount, heading);
                 digitalWrite(BUZZER_PIN, LOW);
                 runStart = millis();
                 timer = runStart + (unsigned long)pathTime;
@@ -448,6 +488,14 @@ void loop() {
                     ? fmod(heading + MID_TURN_DEG, 360.0)
                     : heading;
                 runMotors(targetHeading, ramp);
+                // Safeguard: abort if sub drifts too far right of original heading
+                double rightDev = calculateError(yaw, heading);
+                if (rightDev > MAX_RIGHT_DEV_DEG) {
+                    Serial.printf(">>> ABORT: %.1f° right of heading (limit %.1f°)\n",
+                                  rightDev, MAX_RIGHT_DEV_DEG);
+                    stopMotors();
+                    runState = RunState::Finished;
+                }
             } else {
                 recoveryHeading = fmod(heading + RECOVERY_DEGREES, 360.0);
                 recoveryTimer = millis() + (unsigned long)RECOVERY_TIME_MS;
@@ -464,12 +512,30 @@ void loop() {
                 Serial.println(">>> Recovery timeout, stopping");
                 runState = RunState::Finished;
             } else {
-                runMotors(recoveryHeading);
+                runMotors(recoveryHeading, 1.0f, 2);
+                double rightDev = calculateError(yaw, heading);
+                if (rightDev > MAX_RIGHT_DEV_DEG) {
+                    Serial.printf(">>> ABORT (recovery): %.1f° right of heading\n", rightDev);
+                    stopMotors();
+                    runState = RunState::Finished;
+                }
             }
             break;
 
         case RunState::Finished:
             stopMotors();
+            // Backtrack through log to find last sample where pitch was still flat —
+            // more accurate than millis() which fires after the 45° threshold is crossed.
+            runEndTime = millis();
+            for (int i = logCount - 1; i >= 0; i--) {
+                if (fabs(logBuffer[i].pitch) < PICKUP_PITCH_DEG / 2.0f) {
+                    runEndTime = logBuffer[i].timestamp;
+                    break;
+                }
+            }
+            if (runStart > 0) {
+                Serial.printf(">>> Run duration: %.2f s\n", (runEndTime - runStart) / 1000.0f);
+            }
             Serial.println(">>> Transitioning Finished -> Idle");
             runState = RunState::Idle;
             break;
