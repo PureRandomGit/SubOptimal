@@ -67,25 +67,25 @@ sh2_SensorValue_t sensorValue;
 
 // Timing
 static const double PICKUP_PITCH_DEG  = 45.0;  // pitch threshold for pickup detection
-static const double RECOVERY_DEGREES  = 45.0;  // degrees left to turn in recovery
+static const double RECOVERY_DEGREES  = 35.0;  // degrees left to turn in recovery
 static const double RECOVERY_TIME_MS  = 5000;  // max recovery duration before stopping
-static const unsigned long RAMP_UP_MS = 750;   // acceleration ramp from stabilize to full speed
+static const unsigned long RAMP_UP_MS = 500;   // acceleration ramp from stabilize to full speed
 static const double MID_TURN_DEG     = 25.0;  // degrees to turn mid-run
 static const unsigned long MID_TURN_MS = 1000; // ms into run to start mid-turn
 static const double pathTime = 5000;
-unsigned long timer    = 0;
+unsigned long timer = 0;
 unsigned long runStart = 0;
 unsigned long recoveryTimer = 0;
 double recoveryHeading = 0.0;
 
 // PIDs
-static double stabilizeSpeed = 0.08;
+static double stabilizeSpeed = 0.12;
 
 // Yaw PID
 double yawInput, yawOutput, yawSetpoint;
 
-double yawkp = 0.025;
-double yawki = 0.005;
+double yawkp = 0.022;
+double yawki = 0.0;
 double yawkd = 0.0;
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, yawkp, yawki, yawkd, DIRECT);
 
