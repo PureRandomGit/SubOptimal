@@ -72,7 +72,7 @@ static const double RECOVERY_TIME_MS  = 5000;  // max recovery duration before s
 static const unsigned long RAMP_UP_MS = 750;   // acceleration ramp from stabilize to full speed
 static const double MID_TURN_DEG     = 25.0;  // degrees to turn mid-run
 static const unsigned long MID_TURN_MS = 1000; // ms into run to start mid-turn
-static const double pathTime = 4500;
+static const double pathTime = 5000;
 unsigned long timer    = 0;
 unsigned long runStart = 0;
 unsigned long recoveryTimer = 0;
@@ -90,7 +90,7 @@ double yawkd = 0.0;
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, yawkp, yawki, yawkd, DIRECT);
 
 // Pitch PD — P on angle error (targets level), D on gyro rate (fast response)
-static const double BASE_PITCH_DEG    = 0.5;  // level-flight pitch setpoint
+static const double BASE_PITCH_DEG    = 2;  // level-flight pitch setpoint
 double pitchOutput, pitchSetpoint = BASE_PITCH_DEG;
 double pitchkp = 0.04;
 double pitchkd = 0.001;
@@ -153,30 +153,51 @@ void serveLogs() {
     Serial.printf("Served %d log entries\n", logCount);
 }
 
-// Connects To Wifi
-void connectToWiFi() {
+// WiFi — non-blocking connect with timeout
+bool wifiConnecting = false;
+unsigned long wifiConnectStart = 0;
+static const unsigned long WIFI_TIMEOUT_MS = 10000;
+
+void startWiFiConnect() {
+    if (wifiConnecting) return;
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
+    wifiConnecting = true;
+    wifiConnectStart = millis();
     Serial.println("\nConnecting to WiFi Network ..");
+}
 
-    while(WiFi.status() != WL_CONNECTED){
-        Serial.print(".");
-        delay(100);
+// Call each loop iteration — returns true once connected
+bool tryWiFiConnect() {
+    if (wifiConnected) return true;
+    if (!wifiConnecting) { startWiFiConnect(); return false; }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\nConnected to the WiFi network");
+        Serial.print("Local ESP32 IP: ");
+        Serial.println(WiFi.localIP());
+
+        ArduinoOTA.begin();
+
+        if (!webServerStarted) {
+            webServer.on("/logs", HTTP_GET, serveLogs);
+            webServerStarted = true;
+        }
+        webServer.begin();
+        Serial.printf("Log server up at http://%s/logs (%d entries)\n", WiFi.localIP().toString().c_str(), logCount);
+        chime(2, 200);
+        wifiConnected = true;
+        wifiConnecting = false;
+        return true;
     }
-    Serial.println("\nConnected to the WiFi network");
-    Serial.print("Local ESP32 IP: ");
-    Serial.println(WiFi.localIP());
 
-    ArduinoOTA.begin();
-
-    if (!webServerStarted) {
-        webServer.on("/logs", HTTP_GET, serveLogs);
-        webServerStarted = true;
+    if (millis() - wifiConnectStart > WIFI_TIMEOUT_MS) {
+        Serial.println("\nWiFi connection timed out");
+        WiFi.disconnect();
+        wifiConnecting = false;
+        return false;
     }
-    webServer.begin();
-    Serial.printf("Log server up at http://%s/logs (%d entries)\n", WiFi.localIP().toString().c_str(), logCount);
-    chime(2, 200);
-    wifiConnected = true;
+    return false;
 }
 
 float toDegrees(double radians) {
@@ -336,7 +357,7 @@ void setup() {
 
     delay(1000);
     Serial.begin(115200);
-    connectToWiFi();
+    startWiFiConnect();
 
     // IMU Setup
     SPI.begin(BNO08X_SCK, BNO08X_MISO, BNO08X_MOSI, BNO08X_CS);
@@ -378,11 +399,12 @@ void loop() {
     switch (runState) {
 
         case RunState::Idle:
-            if (!wifiConnected) connectToWiFi();
+            tryWiFiConnect();
             if (reedSwitch.isPressed()) {
                 Serial.println(">>> Transitioning Idle -> Armed");
                 WiFi.disconnect();
                 wifiConnected = false;
+                wifiConnecting = false;
                 runState = RunState::Armed;
             }
             break;
