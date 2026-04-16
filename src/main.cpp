@@ -76,12 +76,12 @@ sh2_SensorValue_t sensorValue;
 
 // Timing
 static const double PICKUP_PITCH_DEG  = 45.0;  // pitch threshold for pickup detection
-static const double RECOVERY_DEGREES  = 35.0;  // degrees left to turn in recovery
+static const double RECOVERY_DEGREES  = 50.0;  // degrees left to turn in recovery
 static const double RECOVERY_TIME_MS  = 5000;  // max recovery duration before stopping
-static const unsigned long RAMP_UP_MS = 500;   // acceleration ramp from stabilize to full speed
+static const unsigned long RAMP_UP_MS = 300;   // acceleration ramp from stabilize to full speed
 static const double MID_TURN_DEG     = 25.0;  // degrees to turn mid-run
 static const unsigned long MID_TURN_MS = 1000; // ms into run to start mid-turn
-static const double pathTime = 5000;
+static const double pathTime = 5000; // 4500 m for perfection poggies omg nice one lol
 static const double MAX_RIGHT_DEV_DEG = 30.0;  // abort if sub drifts this far right of heading
 static const double MAX_RIGHT_YAW_OUT = 0.15;  // cap rightward yaw correction (sub only goes straight/left)
 unsigned long timer = 0;
@@ -90,7 +90,7 @@ unsigned long recoveryTimer = 0;
 double recoveryHeading = 0.0;
 
 // PIDs
-static double stabilizeSpeed = 0.12;
+static double stabilizeSpeed = 0.10;
 
 // Yaw PID
 double yawInput, yawOutput, yawSetpoint;
@@ -101,7 +101,7 @@ double yawkd = 0.0;
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, yawkp, yawki, yawkd, DIRECT);
 
 // Pitch PD — P on angle error (targets level), D on gyro rate (fast response)
-static const double BASE_PITCH_DEG    = 2;  // level-flight pitch setpoint
+static const double BASE_PITCH_DEG    = 4;  // level-flight pitch setpoint
 double pitchOutput, pitchSetpoint = BASE_PITCH_DEG;
 double pitchkp = 0.04;
 double pitchkd = 0.001;

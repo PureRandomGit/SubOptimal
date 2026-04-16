@@ -17,6 +17,7 @@ from datetime import datetime
 import requests
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+import matplotlib.ticker as ticker
 
 
 def fetch_logs(ip: str) -> str:
@@ -162,6 +163,14 @@ class App:
             return run_end - run_start
         return None
 
+    @staticmethod
+    def _apply_precision(ax, ax_r=None, x_decimals=2, y_decimals=2, yr_decimals=3):
+        """Apply consistent decimal precision to axis tick labels."""
+        ax.xaxis.set_major_formatter(ticker.FormatStrFormatter(f"%.{x_decimals}f"))
+        ax.yaxis.set_major_formatter(ticker.FormatStrFormatter(f"%.{y_decimals}f"))
+        if ax_r is not None:
+            ax_r.yaxis.set_major_formatter(ticker.FormatStrFormatter(f"%.{yr_decimals}f"))
+
     def _add_transition_line(self, ax, transition_t):
         """Add a vertical line marking Armed->Running transition."""
         if transition_t is not None:
@@ -199,6 +208,7 @@ class App:
         lines1 = ax1.get_lines() + ax1_r.get_lines()
         ax1.legend(lines1, [l.get_label() for l in lines1], loc="upper right", fontsize=8)
         ax1.grid(True, alpha=0.4)
+        self._apply_precision(ax1, ax1_r)
         self._add_transition_line(ax1, transition_t)
 
         # --- Roll ---
@@ -217,6 +227,7 @@ class App:
         lines2 = ax2.get_lines() + ax2_r.get_lines()
         ax2.legend(lines2, [l.get_label() for l in lines2], loc="upper right", fontsize=8)
         ax2.grid(True, alpha=0.4)
+        self._apply_precision(ax2, ax2_r)
         self._add_transition_line(ax2, transition_t)
 
         # --- Yaw ---
@@ -234,6 +245,7 @@ class App:
         lines3 = ax3.get_lines() + ax3_r.get_lines()
         ax3.legend(lines3, [l.get_label() for l in lines3], loc="upper right", fontsize=8)
         ax3.grid(True, alpha=0.4)
+        self._apply_precision(ax3, ax3_r)
         self._add_transition_line(ax3, transition_t)
 
         # --- Motor outputs ---
@@ -247,6 +259,7 @@ class App:
         ax4.set_ylim(0, 1)
         ax4.legend(loc="upper right", fontsize=8)
         ax4.grid(True, alpha=0.4)
+        self._apply_precision(ax4, y_decimals=3)
         self._add_transition_line(ax4, transition_t)
 
         # --- Battery voltage ---
@@ -257,6 +270,7 @@ class App:
         ax5.set_xlabel("Time (s)")
         ax5.legend(loc="upper right", fontsize=8)
         ax5.grid(True, alpha=0.4)
+        self._apply_precision(ax5, y_decimals=3)
         self._add_transition_line(ax5, transition_t)
 
         self.fig.tight_layout(rect=[0, 0, 1, 0.96])
