@@ -10,7 +10,7 @@ from scipy.optimize import curve_fit
 # ─── Config ───────────────────────────────────────────────────────────────────
 SHEET_ID     = "1cS6S8ULz608Zomaz527y1Dg4Eam2BbXB60R-wgyfbHs"
 THRUST_GOAL  = 650    # g
-AMP_LIMIT    = 14     # A
+AMP_LIMIT    = 18     # A
 EXTRAP_PITCH = 100    # how far to extrapolate pitch beyond tested data
 EXTRAP_DIAM  = 60     # how far to extrapolate diameter beyond tested data
 MIN_POINTS   = 1      # minimum data points needed to attempt fitting
@@ -288,11 +288,10 @@ for blades in all_blade_counts:
         continue
 
     data_max_diam    = sub["Diameter"].max()
-    diam_range_grid  = np.linspace(sub.Diameter.min(), max(data_max_diam, EXTRAP_DIAM), 400)
+    TARGET_DIAM      = 40
     pitch_range_grid = np.linspace(sub.Pitch.min(), EXTRAP_PITCH, 400)
-    DG, PG   = np.meshgrid(diam_range_grid, pitch_range_grid)
-    D_flat   = DG.ravel()
-    P_flat   = PG.ravel()
+    D_flat   = np.full_like(pitch_range_grid, TARGET_DIAM)
+    P_flat   = pitch_range_grid
     T_grid   = thrust_phys((D_flat, P_flat), *pt)
     A_grid   = amps_phys((D_flat, P_flat), *pa)
 
@@ -319,14 +318,14 @@ for blades in all_blade_counts:
         diam_extrap=diam_extrap, pitch_extrap=pitch_extrap,
     )
 
-    print(f"\n  Best config — highest thrust under {AMP_LIMIT}A (Physics model)")
+    print(f"\n  Best config — highest thrust under {AMP_LIMIT}A at {TARGET_DIAM}mm diameter (Physics model)")
     print(f"  {'─'*45}")
-    print(f"  Diameter : {best_d:.1f} in")
+    print(f"  Diameter : {best_d:.1f} mm (fixed)")
     print(f"  Pitch    : {best_p:.1f} in{extrap}")
     print(f"  Thrust   : {best_t:.0f} g  (±{phys_t_std:.0f}g)")
     print(f"  Amps     : {best_a:.2f} A  (±{phys_a_std:.2f}A)  limit <{AMP_LIMIT}A")
 
-    print(f"\n  Top 15 predicted configs (under {AMP_LIMIT}A, highest thrust first):")
+    print(f"\n  Top 15 predicted configs (under {AMP_LIMIT}A at {TARGET_DIAM}mm diameter, highest thrust first):")
     print(f"  {'Diam':>6}  {'Pitch':>6}  {'Thrust':>9}  {'Amps':>7}  Note")
     print(f"  {'─'*58}")
 

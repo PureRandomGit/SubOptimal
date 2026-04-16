@@ -78,10 +78,10 @@ sh2_SensorValue_t sensorValue;
 static const double PICKUP_PITCH_DEG  = 45.0;  // pitch threshold for pickup detection
 static const double RECOVERY_DEGREES  = 50.0;  // degrees left to turn in recovery
 static const double RECOVERY_TIME_MS  = 5000;  // max recovery duration before stopping
-static const unsigned long RAMP_UP_MS = 300;   // acceleration ramp from stabilize to full speed
+static const unsigned long RAMP_UP_MS = 200;   // acceleration ramp from stabilize to full speed
 static const double MID_TURN_DEG     = 25.0;  // degrees to turn mid-run
-static const unsigned long MID_TURN_MS = 1000; // ms into run to start mid-turn
-static const double pathTime = 5000; // 4500 m for perfection poggies omg nice one lol
+static const unsigned long MID_TURN_MS = 700; // ms into run to start mid-turn
+static const double pathTime = 5500; // 4500 m for perfection poggies omg nice one lol
 static const double MAX_RIGHT_DEV_DEG = 30.0;  // abort if sub drifts this far right of heading
 static const double MAX_RIGHT_YAW_OUT = 0.15;  // cap rightward yaw correction (sub only goes straight/left)
 unsigned long timer = 0;
@@ -95,7 +95,7 @@ static double stabilizeSpeed = 0.10;
 // Yaw PID
 double yawInput, yawOutput, yawSetpoint;
 
-double yawkp = 0.022;
+double yawkp = 0.02;
 double yawki = 0.0;
 double yawkd = 0.0;
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, yawkp, yawki, yawkd, DIRECT);
