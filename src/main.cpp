@@ -96,7 +96,7 @@ static const float RUN_BASE_SPEED = 0.10f;  // minimum motor speed during run â€
 // Yaw PID
 double yawInput, yawOutput, yawSetpoint;
 
-double yawkp = 0.02;
+double yawkp = 0.018;
 double yawki = 0.0;
 double yawkd = 0.0;
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, yawkp, yawki, yawkd, DIRECT);
