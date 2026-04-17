@@ -78,9 +78,9 @@ sh2_SensorValue_t sensorValue;
 static const double PICKUP_PITCH_DEG  = 45.0;  // pitch threshold for pickup detection
 static const double RECOVERY_DEGREES  = 50.0;  // degrees left to turn in recovery
 static const double RECOVERY_TIME_MS  = 5000;  // max recovery duration before stopping
-static const unsigned long RAMP_UP_MS = 200;   // acceleration ramp from stabilize to full speed
+static const unsigned long RAMP_UP_MS = 500;   // acceleration ramp from stabilize to full speed
 static const double MID_TURN_DEG     = 25.0;  // degrees to turn mid-run
-static const unsigned long MID_TURN_MS = 700; // ms into run to start mid-turn
+static const unsigned long MID_TURN_MS = 500; // ms into run to start mid-turn
 static const double pathTime = 5500; // 4500 m for perfection poggies omg nice one lol
 static const double MAX_RIGHT_DEV_DEG = 30.0;  // abort if sub drifts this far right of heading
 static const double MAX_RIGHT_YAW_OUT = 0.15;  // cap rightward yaw correction (sub only goes straight/left)
@@ -91,6 +91,7 @@ double recoveryHeading = 0.0;
 
 // PIDs
 static double stabilizeSpeed = 0.10;
+static const float RUN_BASE_SPEED = 0.10f;  // minimum motor speed during run — prevents dead stops
 
 // Yaw PID
 double yawInput, yawOutput, yawSetpoint;
@@ -101,14 +102,16 @@ double yawkd = 0.0;
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, yawkp, yawki, yawkd, DIRECT);
 
 // Pitch PD — P on angle error (targets level), D on gyro rate (fast response)
-static const double BASE_PITCH_DEG    = 4;  // level-flight pitch setpoint
+
+static const double BASE_PITCH_DEG    = 6.5;  // level-flight pitch setpoint
+
 double pitchOutput, pitchSetpoint = BASE_PITCH_DEG;
-double pitchkp = 0.04;
+double pitchkp = 0.02;
 double pitchkd = 0.001;
 
 // Roll PID
 double rollInput, rollOutput, rollSetpoint;
-double rollkp = 0.03;
+double rollkp = 0.02;
 double rollki = 0.0;
 double rollkd = 0.0;
 PID rollPID(&rollInput, &rollOutput, &rollSetpoint, rollkp, rollki, rollkd, DIRECT);
@@ -350,25 +353,20 @@ void runMotors(double targetHeading, float maxSpeed = 1.0f, uint8_t logState = 1
     float c_bl =  pitchOutput + yawOutput + rollOutput;
     float c_br =  pitchOutput - yawOutput - rollOutput;
 
-    // Normalise into [0, 1] — fastest motor at 1.0, preserve all differentials
+    // Normalise into [RUN_BASE_SPEED, 1.0] — fastest motor at 1.0, slowest at base (no dead stops)
     float maxC = max(max(c_tl, c_tr), max(c_bl, c_br));
     float minC = min(min(c_tl, c_tr), min(c_bl, c_br));
     float range = maxC - minC;
 
     float tl, tr, bl, br;
-    if (range > 1.0f) {
-        // Corrections too wide — scale to preserve ratios
-        float s = 1.0f / range;
-        tl = (c_tl - minC) * s;
-        tr = (c_tr - minC) * s;
-        bl = (c_bl - minC) * s;
-        br = (c_br - minC) * s;
+    if (range < 1e-6f) {
+        tl = tr = bl = br = 1.0f;
     } else {
-        // Shift so fastest motor = 1.0, all others >= 0
-        tl = 1.0f - (maxC - c_tl);
-        tr = 1.0f - (maxC - c_tr);
-        bl = 1.0f - (maxC - c_bl);
-        br = 1.0f - (maxC - c_br);
+        float scale = (1.0f - RUN_BASE_SPEED) / range;
+        tl = RUN_BASE_SPEED + (c_tl - minC) * scale;
+        tr = RUN_BASE_SPEED + (c_tr - minC) * scale;
+        bl = RUN_BASE_SPEED + (c_bl - minC) * scale;
+        br = RUN_BASE_SPEED + (c_br - minC) * scale;
     }
 
     tl *= maxSpeed;
