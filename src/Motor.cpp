@@ -1,8 +1,9 @@
 #include "Motor.h"
 
-// Standard ESC pulse widths in microseconds
-static const int MIN_PULSE_US = 1000;
-static const int MAX_PULSE_US = 2000;
+// ESC pulse widths in microseconds
+static const int STOP_PULSE_US = 1000;  // disarm / full stop
+static const int MIN_PULSE_US  = 1100;  // minimum spinning throttle (ESC calibrated range)
+static const int MAX_PULSE_US  = 2000;
 
 Motor::Motor(int motorPin, int ch, int pwmFreq, int pwmResBits, float correctionFactor)
     : pin(motorPin), channel(ch), frequency(pwmFreq), resolutionBits(pwmResBits), currentSpeed(0.0), correction(correctionFactor) {
@@ -48,7 +49,12 @@ void Motor::setSpeed(float speed) {
 }
 
 void Motor::stop() {
-    setSpeed(0.0);
+    currentSpeed = 0.0;
+    // Send STOP_PULSE_US (1000) to disarm ESC, bypassing the 1100-2000 active range
+    int periodUs = 1000000 / frequency;
+    uint32_t duty = (uint32_t)((long)STOP_PULSE_US * maxDuty / periodUs);
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)channel, duty);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)channel);
 }
 
 float Motor::getSpeed() {
