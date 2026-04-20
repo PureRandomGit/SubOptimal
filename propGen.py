@@ -1,12 +1,19 @@
 import pandas as pd
 import numpy as np
-from scipy.interpolate import griddata
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import Ridge
+from sklearn.pipeline import make_pipeline
+from scipy.optimize import curve_fit
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-SHEET_ID    = "1cS6S8ULz608Zomaz527y1Dg4Eam2BbXB60R-wgyfbHs"
-THRUST_GOAL = 650   # g
-AMP_LIMIT   = 14    # A
-GRID_RES    = 400   # interpolation resolution (higher = more precise)
+SHEET_ID     = "1cS6S8ULz608Zomaz527y1Dg4Eam2BbXB60R-wgyfbHs"
+THRUST_GOAL  = 650    # g
+AMP_LIMIT    = 18     # A
+EXTRAP_PITCH = 100    # how far to extrapolate pitch beyond tested data
+EXTRAP_DIAM  = 60     # how far to extrapolate diameter beyond tested data
+MIN_POINTS   = 1      # minimum data points needed to attempt fitting
 
 # ─── Load ─────────────────────────────────────────────────────────────────────
 url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv"
@@ -20,64 +27,344 @@ df = df.rename(columns={
 df = df.dropna(subset=["Blades","Diameter","Pitch","Thrust","Amps"])
 df["Blades"] = df["Blades"].astype(int)
 
-print("=" * 60)
-print(f"  Propeller Optimizer")
-print(f"  Goal: ≥{THRUST_GOAL} g thrust  |  <{AMP_LIMIT} A  |  min diameter, max pitch")
-print("=" * 60)
+# ─── Model functions ──────────────────────────────────────────────────────────
+def thrust_phys(X, k, a, b):
+    D, P = X
+    return k * (D**a) * (P**b)
 
-results = []
+def amps_phys(X, k, c, d):
+    D, P = X
+    return k * (D**c) * (P**d)
 
-for blades in sorted(df["Blades"].unique()):
-    sub = df[df["Blades"] == blades]
-    if len(sub) < 4:
+def r2(actual, predicted):
+    ss_res = np.sum((actual - predicted)**2)
+    ss_tot = np.sum((actual - actual.mean())**2)
+    return 1 - ss_res / ss_tot
+
+# ─── Colors per diameter ──────────────────────────────────────────────────────
+diam_colors = {
+    28:"#e07b39", 32:"#7b9de0", 33:"#9de07b",
+    37:"#de7be0", 42:"#e0c97b", 40:"#7be0d8",
+}
+
+# ─── Process each blade count ─────────────────────────────────────────────────
+all_blade_counts = sorted(df["Blades"].unique())
+best_per_blade = {}  # blades -> best result dict
+
+for blades in all_blade_counts:
+    sub = df[df.Blades == blades].copy()
+    n   = len(sub)
+
+    print(f"\n{'═'*65}")
+    print(f"  {blades}-BLADE  ({n} data points)")
+    print(f"{'═'*65}")
+
+    # ── Not enough data ────────────────────────────────────────────────────────
+    if n < MIN_POINTS:
+        print(f"  ✗ Skipping: only {n} data point(s) — need at least {MIN_POINTS} to fit a model.")
+        print(f"    Collect more {blades}-blade test data to enable predictions.")
         continue
 
-    pts     = sub[["Diameter","Pitch"]].values
-    diams   = np.linspace(sub.Diameter.min(), sub.Diameter.max(), GRID_RES)
-    pitches = np.linspace(sub.Pitch.min(),    sub.Pitch.max(),    GRID_RES)
-    D, P    = np.meshgrid(diams, pitches)
-    gp      = np.column_stack([D.ravel(), P.ravel()])
+    # ── Outlier detection: flag points where amps deviate >2.5 std from a quick fit
+    # Fit a rough physics model, find residuals, exclude gross outliers from fitting only
+    def _amps_phys(X, k, c, d): D, P = X; return k * (D**c) * (P**d)
+    try:
+        _pa, _ = curve_fit(_amps_phys,
+                           (sub.Diameter.values.astype(float), sub.Pitch.values.astype(float)),
+                           sub.Amps.values, p0=[0.001,1.0,0.5], maxfev=5000)
+        _resid = sub.Amps.values - _amps_phys(
+                     (sub.Diameter.values.astype(float), sub.Pitch.values.astype(float)), *_pa)
+        outlier_mask = np.abs(_resid) > 2.5 * _resid.std()
+        if outlier_mask.any():
+            print(f"  ⚠ Suspected amp outlier(s) excluded from model fitting (shown as hollow points on chart):")
+            for _, r in sub[outlier_mask].iterrows():
+                print(f"    D={int(r.Diameter)} P={int(r.Pitch)}: measured {r.Amps:.1f}A, model expected {_amps_phys((r.Diameter, r.Pitch), *_pa):.1f}A")
+        sub_fit = sub[~outlier_mask].copy()
+        sub_outliers = sub[outlier_mask].copy()
+    except Exception:
+        sub_fit = sub.copy()
+        sub_outliers = sub.iloc[0:0].copy()
+        outlier_mask = np.zeros(len(sub), dtype=bool)
 
-    T = griddata(pts, sub["Thrust"].values, gp, method="linear").reshape(D.shape)
-    A = griddata(pts, sub["Amps"].values,   gp, method="linear").reshape(D.shape)
+    X     = sub_fit[["Diameter","Pitch"]].values
+    y_t   = sub_fit["Thrust"].values
+    y_a   = sub_fit["Amps"].values
+    D_arr = sub_fit["Diameter"].values.astype(float)
+    P_arr = sub_fit["Pitch"].values.astype(float)
+    data_max_pitch = sub["Pitch"].max()
+    diameters      = sorted(sub["Diameter"].unique())
 
-    valid = (T >= THRUST_GOAL) & (A < AMP_LIMIT) & ~np.isnan(T) & ~np.isnan(A)
+    # ── Polynomial model (degree 2) ───────────────────────────────────────────
+    pipe_t = make_pipeline(PolynomialFeatures(2), Ridge(alpha=1.0))
+    pipe_a = make_pipeline(PolynomialFeatures(2), Ridge(alpha=1.0))
+    pipe_t.fit(X, y_t)
+    pipe_a.fit(X, y_a)
 
-    if not valid.any():
-        print(f"\n  {blades}-blade:  No region meets both goals within tested data range.")
-        continue
+    poly_t_std = (y_t - pipe_t.predict(X)).std()
+    poly_a_std = (y_a - pipe_a.predict(X)).std()
+    poly_r2_t  = r2(y_t, pipe_t.predict(X))
+    poly_r2_a  = r2(y_a, pipe_a.predict(X))
 
-    # Score: minimize diameter, maximize pitch → minimize (D - P)
-    score = D - P
-    score[~valid] = np.inf
-    idx = np.unravel_index(np.argmin(score), score.shape)
+    # ── Physics model ─────────────────────────────────────────────────────────
+    try:
+        pt, _ = curve_fit(thrust_phys, (D_arr, P_arr), y_t, p0=[0.001, 2.0, 1.0], maxfev=10000)
+        pa, _ = curve_fit(amps_phys,   (D_arr, P_arr), y_a, p0=[0.001, 1.0, 0.5], maxfev=10000)
+        phys_ok = True
+    except RuntimeError:
+        print("  ⚠ Physics model failed to converge — showing polynomial only.")
+        phys_ok = False
 
-    bd, bp, bt, ba = D[idx], P[idx], T[idx], A[idx]
-    results.append({"Blades": blades, "Diameter": bd, "Pitch": bp, "Thrust": bt, "Amps": ba})
-
-    # Real measured props that also pass
-    real_pass = sub[(sub.Thrust >= THRUST_GOAL) & (sub.Amps < AMP_LIMIT)]\
-                    .sort_values(["Diameter","Pitch"], ascending=[True,False])
-
-    print(f"\n  ── {blades}-Blade ──────────────────────────────────────")
-    print(f"  Theoretical optimum (interpolated):")
-    print(f"    Diameter : {bd:.1f} in")
-    print(f"    Pitch    : {bp:.1f} in")
-    print(f"    Thrust   : {bt:.1f} g")
-    print(f"    Amps     : {ba:.2f} A")
-
-    if len(real_pass):
-        print(f"\n  Measured props that meet goals (best first):")
-        for _, r in real_pass.iterrows():
-            flag = "  ← smallest diam / highest pitch" if (r.Diameter == real_pass.Diameter.min() and r.Pitch == real_pass[real_pass.Diameter == real_pass.Diameter.min()].Pitch.max()) else ""
-            print(f"    {int(r.Diameter)}\" diam × {int(r.Pitch)}\" pitch  →  {r.Thrust:.0f} g  /  {r.Amps:.1f} A{flag}")
+    if phys_ok:
+        phys_t_std = (y_t - thrust_phys((D_arr, P_arr), *pt)).std()
+        phys_a_std = (y_a - amps_phys((D_arr, P_arr), *pa)).std()
+        phys_r2_t  = r2(y_t, thrust_phys((D_arr, P_arr), *pt))
+        phys_r2_a  = r2(y_a, amps_phys((D_arr, P_arr), *pa))
     else:
-        print(f"  No measured props meet both goals.")
+        phys_t_std = phys_a_std = phys_r2_t = phys_r2_a = None
 
-print("\n" + "=" * 60)
-if results:
-    best_overall = min(results, key=lambda r: r["Diameter"] - r["Pitch"])
-    print(f"  Best across all blade counts:")
-    print(f"    {int(best_overall['Blades'])} blades  |  {best_overall['Diameter']:.1f}\" diam  |  {best_overall['Pitch']:.1f}\" pitch")
-    print(f"    {best_overall['Thrust']:.0f} g thrust  |  {best_overall['Amps']:.2f} A")
-print("=" * 60)
+    print(f"  Polynomial  — Thrust R²: {poly_r2_t:.3f}  Amps R²: {poly_r2_a:.3f}")
+    if phys_ok:
+        print(f"  Physics     — Thrust R²: {phys_r2_t:.3f}  Amps R²: {phys_r2_a:.3f}")
+
+    # ── Chart ─────────────────────────────────────────────────────────────────
+    pitch_range = np.linspace(sub["Pitch"].min(), EXTRAP_PITCH, 300)
+    tested_mask = pitch_range <= data_max_pitch
+    extrap_mask = ~tested_mask
+
+    subtitle = (
+        f"Physics R²: T={phys_r2_t:.3f} A={phys_r2_a:.3f}  |  "
+        f"Poly R²: T={poly_r2_t:.3f} A={poly_r2_a:.3f}"
+        if phys_ok else
+        f"Poly R²: T={poly_r2_t:.3f} A={poly_r2_a:.3f}  |  Physics model unavailable"
+    )
+
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=[
+            "Polynomial — Thrust vs Pitch",
+            "Physics model — Thrust vs Pitch",
+            "Polynomial — Amps vs Pitch",
+            "Physics model — Amps vs Pitch",
+        ],
+        vertical_spacing=0.12,
+        horizontal_spacing=0.08,
+    )
+
+    for diam in diameters:
+        col      = diam_colors.get(diam, "#aaaaaa")
+        label    = f"{int(diam)}\""
+        pts_test = sub[sub.Diameter == diam]
+
+        poly_t_pred = pipe_t.predict([[diam, p] for p in pitch_range])
+        poly_a_pred = pipe_a.predict([[diam, p] for p in pitch_range])
+
+        if phys_ok:
+            phys_t_pred = thrust_phys((np.full_like(pitch_range, diam), pitch_range), *pt)
+            phys_a_pred = amps_phys((np.full_like(pitch_range, diam), pitch_range), *pa)
+        else:
+            phys_t_pred = phys_a_pred = None
+
+        model_variants = [(poly_t_pred, poly_a_pred, poly_t_std, poly_a_std, 1)]
+        if phys_ok:
+            model_variants.append((phys_t_pred, phys_a_pred, phys_t_std, phys_a_std, 2))
+
+        for t_pred, a_pred, t_std, a_std, col_idx in model_variants:
+            first = (col_idx == 1)
+
+            # Thrust — solid in tested range
+            fig.add_trace(go.Scatter(
+                x=pitch_range[tested_mask], y=t_pred[tested_mask],
+                mode="lines", line=dict(color=col, width=2),
+                name=label, legendgroup=label, showlegend=first,
+            ), row=1, col=col_idx)
+
+            # Thrust — dotted extrapolation + confidence band
+            if extrap_mask.any():
+                fig.add_trace(go.Scatter(
+                    x=np.concatenate([pitch_range[extrap_mask], pitch_range[extrap_mask][::-1]]),
+                    y=np.concatenate([t_pred[extrap_mask]+t_std, (t_pred[extrap_mask]-t_std)[::-1]]),
+                    fill="toself", fillcolor=col, line=dict(width=0), opacity=0.10,
+                    showlegend=False, legendgroup=label,
+                ), row=1, col=col_idx)
+                fig.add_trace(go.Scatter(
+                    x=pitch_range[extrap_mask], y=t_pred[extrap_mask],
+                    mode="lines", line=dict(color=col, width=2, dash="dot"),
+                    showlegend=False, legendgroup=label,
+                ), row=1, col=col_idx)
+
+            # Thrust — real data points
+            fig.add_trace(go.Scatter(
+                x=pts_test["Pitch"], y=pts_test["Thrust"],
+                mode="markers", marker=dict(color=col, size=8, line=dict(color="white", width=1)),
+                showlegend=False, legendgroup=label,
+                hovertemplate=f"{int(diam)}\" diam<br>Pitch: %{{x}}<br>Thrust: %{{y:.0f}}g<extra></extra>",
+            ), row=1, col=col_idx)
+
+            # Amps — solid
+            fig.add_trace(go.Scatter(
+                x=pitch_range[tested_mask], y=a_pred[tested_mask],
+                mode="lines", line=dict(color=col, width=2),
+                showlegend=False, legendgroup=label,
+            ), row=2, col=col_idx)
+
+            # Amps — dotted extrapolation
+            if extrap_mask.any():
+                fig.add_trace(go.Scatter(
+                    x=pitch_range[extrap_mask], y=a_pred[extrap_mask],
+                    mode="lines", line=dict(color=col, width=2, dash="dot"),
+                    showlegend=False, legendgroup=label,
+                ), row=2, col=col_idx)
+
+            # Amps — real data points
+            fig.add_trace(go.Scatter(
+                x=pts_test["Pitch"], y=pts_test["Amps"],
+                mode="markers", marker=dict(color=col, size=8, line=dict(color="white", width=1)),
+                showlegend=False, legendgroup=label,
+                hovertemplate=f"{int(diam)}\" diam<br>Pitch: %{{x}}<br>Amps: %{{y:.1f}}A<extra></extra>",
+            ), row=2, col=col_idx)
+
+        # Outlier points — hollow markers with warning in hover
+        if len(sub_outliers) > 0:
+            pts_out = sub_outliers[sub_outliers.Diameter == diam]
+            if len(pts_out):
+                fig.add_trace(go.Scatter(
+                    x=pts_out["Pitch"], y=pts_out["Amps"],
+                    mode="markers",
+                    marker=dict(color="rgba(0,0,0,0)", size=10,
+                                line=dict(color=col, width=2)),
+                    showlegend=False, legendgroup=label,
+                    hovertemplate=f"{int(diam)}\" diam<br>Pitch: %{{x}}<br>Amps: %{{y:.1f}}A<br><b>⚠ suspected outlier — excluded from model</b><extra></extra>",
+                ), row=2, col=col_idx)
+
+        # If physics unavailable, fill col 2 with a "no data" note
+        if not phys_ok:
+            for row_idx in [1, 2]:
+                fig.add_trace(go.Scatter(
+                    x=[None], y=[None], mode="lines",
+                    showlegend=False,
+                ), row=row_idx, col=2)
+
+    # Goal / limit lines
+    for col_idx in [1, 2]:
+        fig.add_hline(y=THRUST_GOAL, line=dict(color="rgba(60,180,60,0.7)", width=1.5, dash="dash"),
+                      annotation_text=f"{THRUST_GOAL}g goal", annotation_position="bottom right",
+                      row=1, col=col_idx)
+        fig.add_hline(y=AMP_LIMIT, line=dict(color="rgba(220,60,60,0.7)", width=1.5, dash="dash"),
+                      annotation_text=f"{AMP_LIMIT}A limit", annotation_position="top right",
+                      row=2, col=col_idx)
+
+    # Extrapolation boundary
+    for row_idx in [1, 2]:
+        for col_idx in [1, 2]:
+            fig.add_vline(x=data_max_pitch,
+                          line=dict(color="rgba(150,150,150,0.5)", width=1, dash="dash"),
+                          annotation_text="data ends", annotation_position="top left",
+                          row=row_idx, col=col_idx)
+
+    for col_idx in [1, 2]:
+        fig.update_xaxes(title_text="Pitch (in)", row=2, col=col_idx)
+        fig.update_yaxes(title_text="Thrust (g)", row=1, col=col_idx)
+        fig.update_yaxes(title_text="Amps (A)",   row=2, col=col_idx)
+
+    fig.update_layout(
+        title=dict(
+            text=(f"{blades}-Blade Propeller — Predictive Models "
+                  f"(solid = tested range, dotted = extrapolated)<br>"
+                  f"<sup>{subtitle}</sup>"),
+            font=dict(size=15), x=0.5, xanchor="center",
+        ),
+        legend=dict(title="Diameter", x=1.02, y=1),
+        height=750,
+        paper_bgcolor="white",
+        plot_bgcolor="rgb(248,248,252)",
+    )
+    fig.update_xaxes(gridcolor="white", gridwidth=1)
+    fig.update_yaxes(gridcolor="white", gridwidth=1)
+    fig.show()
+
+    # ── 2D optimum search ─────────────────────────────────────────────────────
+    if not phys_ok:
+        print(f"\n  ✗ Cannot run 2D optimum search — physics model unavailable.")
+        continue
+
+    data_max_diam    = sub["Diameter"].max()
+    TARGET_DIAM      = 40
+    pitch_range_grid = np.linspace(sub.Pitch.min(), EXTRAP_PITCH, 400)
+    D_flat   = np.full_like(pitch_range_grid, TARGET_DIAM)
+    P_flat   = pitch_range_grid
+    T_grid   = thrust_phys((D_flat, P_flat), *pt)
+    A_grid   = amps_phys((D_flat, P_flat), *pa)
+
+    valid_mask = A_grid < AMP_LIMIT
+    score_grid = -T_grid.copy()
+    score_grid[~valid_mask] = np.inf
+
+    if np.isinf(score_grid).all():
+        print(f"\n  ✗ No combination stays under {AMP_LIMIT}A within the modeled range.")
+        continue
+
+    best_i = np.argmin(score_grid)
+    best_d = D_flat[best_i]; best_p = P_flat[best_i]
+    best_t = T_grid[best_i]; best_a = A_grid[best_i]
+    diam_extrap  = best_d > data_max_diam
+    pitch_extrap = best_p > data_max_pitch
+    extrap_parts = (["diam"] if diam_extrap else []) + (["pitch"] if pitch_extrap else [])
+    extrap = f" [EXTRAPOLATED: {'+'.join(extrap_parts)}]" if extrap_parts else ""
+
+    best_per_blade[blades] = dict(
+        blades=blades, diameter=best_d, pitch=best_p,
+        thrust=best_t, amps=best_a,
+        thrust_std=phys_t_std, amps_std=phys_a_std,
+        diam_extrap=diam_extrap, pitch_extrap=pitch_extrap,
+    )
+
+    print(f"\n  Best config — highest thrust under {AMP_LIMIT}A at {TARGET_DIAM}mm diameter (Physics model)")
+    print(f"  {'─'*45}")
+    print(f"  Diameter : {best_d:.1f} mm (fixed)")
+    print(f"  Pitch    : {best_p:.1f} in{extrap}")
+    print(f"  Thrust   : {best_t:.0f} g  (±{phys_t_std:.0f}g)")
+    print(f"  Amps     : {best_a:.2f} A  (±{phys_a_std:.2f}A)  limit <{AMP_LIMIT}A")
+
+    print(f"\n  Top 15 predicted configs (under {AMP_LIMIT}A at {TARGET_DIAM}mm diameter, highest thrust first):")
+    print(f"  {'Diam':>6}  {'Pitch':>6}  {'Thrust':>9}  {'Amps':>7}  Note")
+    print(f"  {'─'*58}")
+
+    valid_idx = np.where(valid_mask)[0]
+    order     = np.argsort(score_grid[valid_idx])
+    seen = []; count = 0
+    for i in order:
+        idx  = valid_idx[i]
+        d, p = round(D_flat[idx], 1), round(P_flat[idx], 1)
+        if any(abs(d-sd) < 0.8 and abs(p-sp) < 2.0 for sd, sp in seen):
+            continue
+        seen.append((d, p))
+        t, a = T_grid[idx], A_grid[idx]
+        ep = (["diam"] if d > data_max_diam else []) + (["pitch"] if p > data_max_pitch else [])
+        note = f"[extrapolated: {'+'.join(ep)}]" if ep else "within data range"
+        print(f"  {d:>6.1f}  {p:>6.1f}  {t:>7.0f}g  {a:>5.2f}A  {note}")
+        count += 1
+        if count >= 15:
+            break
+
+    print(f"  {'─'*58}")
+    print(f"  Uncertainty on all predictions: ±{phys_t_std:.0f}g / ±{phys_a_std:.2f}A")
+
+print(f"\n{'═'*65}")
+print(f"  SUMMARY — Best per blade count (highest thrust under {AMP_LIMIT}A)")
+print(f"{'═'*65}")
+if best_per_blade:
+    print(f"  {'Blades':>6}  {'Diam':>6}  {'Pitch':>6}  {'Thrust':>9}  {'Amps':>7}  Note")
+    print(f"  {'─'*65}")
+    for b, r in sorted(best_per_blade.items()):
+        ep = (["diam"] if r['diam_extrap'] else []) + (["pitch"] if r['pitch_extrap'] else [])
+        note = f"[extrapolated: {'+'.join(ep)}]" if ep else "within data range"
+        print(f"  {b:>6}  {r['diameter']:>6.1f}  {r['pitch']:>6.1f}  {r['thrust']:>7.0f}g  {r['amps']:>5.2f}A  {note}")
+    print(f"  {'─'*65}")
+    overall = max(best_per_blade.values(), key=lambda r: r['thrust'])
+    ep = (["diam"] if overall['diam_extrap'] else []) + (["pitch"] if overall['pitch_extrap'] else [])
+    note = f"[extrapolated: {'+'.join(ep)}]" if ep else "within data range"
+    print(f"\n  ★ OVERALL BEST: {int(overall['blades'])}-blade  |  {overall['diameter']:.1f}\" diam  |  {overall['pitch']:.1f}\" pitch  {note}")
+    print(f"    Thrust: {overall['thrust']:.0f}g (±{overall['thrust_std']:.0f}g)  |  Amps: {overall['amps']:.2f}A (±{overall['amps_std']:.2f}A)")
+else:
+    print("  No valid configurations found across any blade count.")
+print(f"\n{'═'*65}\n  Done.\n{'═'*65}\n")

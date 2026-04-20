@@ -48,12 +48,20 @@ struct LogEntry {
     float motorTL, motorTR, motorBL, motorBR;
 };
 
-// 600 entries: room for armed stabilization + 5s run + recovery
-static const int LOG_BUFFER_SIZE = 600;
+// Pre-run ring buffer: keeps the last ~1 s of Armed-state samples (55 × 20 ms ≈ 1.1 s)
+static const int PRE_RUN_BUFFER_SIZE = 55;
+LogEntry preRunBuffer[PRE_RUN_BUFFER_SIZE];
+int preRunHead = 0;   // next write index (wraps)
+int preRunCount = 0;  // valid entries, capped at PRE_RUN_BUFFER_SIZE
+
+// Main log: pre-run + full run + recovery + 1 s post-pickup
+// 55 pre + 325 run (6.5 s) + 750 recovery (15 s) + 50 post = ~1180 → pad to 1300
+static const int LOG_BUFFER_SIZE = 1300;
 LogEntry logBuffer[LOG_BUFFER_SIZE];
 int logCount = 0;
 int runCount = 0;              // increments each Armed->Running transition (per power cycle)
 unsigned long runEndTime = 0;  // set when run finishes for duration calc
+unsigned long finishedLogUntil = 0;  // end time for 1 s post-pickup logging window
 
 WebServer webServer(80);
 bool webServerStarted = false;
@@ -297,9 +305,7 @@ double calculateError(double current, double target) {
     return error;
 }
 
-void logEntry(uint8_t state, float tl, float tr, float bl, float br) {
-    if (logCount >= LOG_BUFFER_SIZE) return;
-    LogEntry& e = logBuffer[logCount++];
+static void fillLogEntry(LogEntry& e, uint8_t state, float tl, float tr, float bl, float br) {
     e.timestamp  = millis();
     e.state      = state;
     e.voltage    = readBatteryVoltage();
@@ -308,6 +314,29 @@ void logEntry(uint8_t state, float tl, float tr, float bl, float br) {
     e.rollIn     = (float)rollInput;   e.rollOut    = (float)rollOutput;  e.rollSetpt  = (float)rollSetpoint;
     e.yawIn      = (float)yawInput;    e.yawOut     = (float)yawOutput;   e.yawSetpt   = (float)yawSetpoint;
     e.motorTL = tl; e.motorTR = tr; e.motorBL = bl; e.motorBR = br;
+}
+
+// state: 0=Armed, 1=Running, 2=Recovery, 3=post-pickup
+void logEntry(uint8_t state, float tl, float tr, float bl, float br) {
+    if (logCount >= LOG_BUFFER_SIZE) return;
+    fillLogEntry(logBuffer[logCount++], state, tl, tr, bl, br);
+}
+
+// Write one Armed-state sample into the ring buffer (overwrites oldest when full)
+void logPreRunEntry(float tl, float tr, float bl, float br) {
+    fillLogEntry(preRunBuffer[preRunHead], 0, tl, tr, bl, br);
+    preRunHead = (preRunHead + 1) % PRE_RUN_BUFFER_SIZE;
+    if (preRunCount < PRE_RUN_BUFFER_SIZE) preRunCount++;
+}
+
+// Copy ring buffer to logBuffer (oldest first) then reset it
+void flushPreRunBuffer() {
+    int start = (preRunCount < PRE_RUN_BUFFER_SIZE) ? 0 : preRunHead;
+    for (int i = 0; i < preRunCount && logCount < LOG_BUFFER_SIZE; i++) {
+        logBuffer[logCount++] = preRunBuffer[(start + i) % PRE_RUN_BUFFER_SIZE];
+    }
+    preRunHead = 0;
+    preRunCount = 0;
 }
 
 void stabilize() {
@@ -327,7 +356,7 @@ void stabilize() {
     bottomLeftMotor.setSpeed(bl);
     bottomRightMotor.setSpeed(br);
 
-    if (newRotation) logEntry(0, tl, tr, bl, br);
+    if (newRotation) logPreRunEntry(tl, tr, bl, br);
 }
 
 void runMotors(double targetHeading, float maxSpeed = 1.0f, uint8_t logState = 1) {
@@ -442,6 +471,9 @@ void loop() {
                 wifiConnecting = false;
                 logCount = 0;
                 runEndTime = 0;
+                finishedLogUntil = 0;
+                preRunHead = 0;
+                preRunCount = 0;
                 yawInput = 0; yawOutput = 0;
                 runState = RunState::Armed;
             }
@@ -465,6 +497,7 @@ void loop() {
                 rollPID.SetMode(AUTOMATIC);
 
                 runCount++;
+                flushPreRunBuffer();  // move last ~1 s of Armed data into the main log
                 Serial.printf(">>> Transitioning Armed -> Running | Run #%d | Captured heading: %.1f\n", runCount, heading);
                 digitalWrite(BUZZER_PIN, LOW);
                 runStart = millis();
@@ -521,12 +554,20 @@ void loop() {
             break;
 
         case RunState::Finished:
-            stopMotors();
-            // Backtrack through log to find last sample where pitch was still flat —
-            // more accurate than millis() which fires after the 45° threshold is crossed.
+            if (finishedLogUntil == 0) {
+                // First entry: stop motors and open a 1-second post-pickup logging window
+                stopMotors();
+                finishedLogUntil = millis() + 1000;
+            }
+            if (millis() < finishedLogUntil) {
+                // Log IMU data for 1 second so graphs show the pickup event
+                if (updateIMU()) logEntry(3, 0, 0, 0, 0);
+                break;
+            }
+            // Window closed — backtrack to find last flat-pitch sample before pickup
             runEndTime = millis();
             for (int i = logCount - 1; i >= 0; i--) {
-                if (fabs(logBuffer[i].pitch) < PICKUP_PITCH_DEG / 2.0f) {
+                if (logBuffer[i].state != 3 && fabs(logBuffer[i].pitch) < PICKUP_PITCH_DEG / 2.0f) {
                     runEndTime = logBuffer[i].timestamp;
                     break;
                 }
@@ -535,6 +576,7 @@ void loop() {
                 Serial.printf(">>> Run duration: %.2f s\n", (runEndTime - runStart) / 1000.0f);
             }
             Serial.println(">>> Transitioning Finished -> Idle");
+            finishedLogUntil = 0;
             runState = RunState::Idle;
             break;
     }
